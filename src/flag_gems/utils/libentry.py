@@ -1576,6 +1576,8 @@ class LibEntry(triton.KernelInterface):
         if changed:
             for cache in self.kernel_cache:
                 cache.clear()
+            self._cpu_cache.clear()
+        return changed
 
     def key(self, spec_args, dns_args, const_args):
         def spec_arg(arg):
