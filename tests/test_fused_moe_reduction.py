@@ -7,7 +7,7 @@ import torch
 import flag_gems
 
 pytestmark = pytest.mark.skipif(
-    flag_gems.device != "cuda", reason="CUDA fused MoE reduction regression"
+    flag_gems.vendor_name != "nvidia", reason="NVIDIA fused MoE reduction regression"
 )
 
 
