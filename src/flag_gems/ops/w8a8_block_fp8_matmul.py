@@ -14,6 +14,7 @@
 
 import functools
 import logging
+import math
 import os
 from typing import Any, Dict, List, Optional
 
@@ -32,7 +33,7 @@ def _get_default_w8a8_block_fp8_config(block_n: int, block_k: int) -> Dict[str, 
         return {
             "BLOCK_SIZE_M": 64,
             "BLOCK_SIZE_N": 64,
-            "BLOCK_SIZE_K": 128,
+            "BLOCK_SIZE_K": min(128, block_k),
             "GROUP_SIZE_M": 4,
             "num_warps": 4,
             "num_stages": 3,
@@ -180,11 +181,17 @@ def w8a8_block_fp8_matmul(
 ) -> torch.Tensor:
     assert len(block_size) == 2
     block_n, block_k = block_size[0], block_size[1]
+    if block_k < 32 or block_k & (block_k - 1):
+        raise ValueError("FP8 K groups must be powers of two >= 32")
+    if block_n <= 0:
+        raise ValueError("block_n must be positive")
+    if not As.is_floating_point() or not Bs.is_floating_point():
+        raise TypeError("matmul requires numeric scales; decode UE8M0 bytes first")
 
     assert A.shape[-1] == B.shape[-1]
     assert A.shape[:-1] == As.shape[:-1] and A.is_contiguous()
     assert triton.cdiv(A.shape[-1], block_k) == As.shape[-1]
-    M = A.numel() // A.shape[-1]
+    M = math.prod(A.shape[:-1])
 
     assert B.ndim == 2 and Bs.ndim == 2
     N, K = B.shape
@@ -193,12 +200,25 @@ def w8a8_block_fp8_matmul(
 
     C_shape = A.shape[:-1] + (N,)
     C = A.new_empty(C_shape, dtype=output_dtype)
+    if M == 0 or N == 0:
+        return C
+    if K == 0:
+        return C.zero_()
 
     configs = get_w8a8_block_fp8_configs(N, K, block_n, block_k)
     if configs:
         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
     else:
         config = _get_default_w8a8_block_fp8_config(block_n, block_k)
+
+    # One K tile loads exactly one scale per operand. Tuned configurations,
+    # like defaults, must not cross a quantization-group boundary. Copy the
+    # cached configuration so calls with another group size cannot mutate it.
+    config = dict(config)
+    tile_k = min(config["BLOCK_SIZE_K"], block_k)
+    if tile_k < 32 or block_k % tile_k:
+        raise ValueError("GEMM K tile must divide the quantization group")
+    config["BLOCK_SIZE_K"] = tile_k
 
     def grid(META):
         return (
