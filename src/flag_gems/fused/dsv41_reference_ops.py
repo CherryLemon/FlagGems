@@ -12,7 +12,90 @@ import torch
 import triton
 import triton.language as tl
 
-from flag_gems.utils import libentry
+from flag_gems.utils import libentry, tl_extra_shim
+
+
+@triton.jit
+def _hc_sum4(x, axis: tl.constexpr):
+    # Butterfly order, matching the published four-way FP32 reduction.
+    lanes = tl.arange(0, 4)
+    if axis == 1:
+        p2 = tl.broadcast_to((lanes ^ 2)[None, :], (4, 4))
+        p1 = tl.broadcast_to((lanes ^ 1)[None, :], (4, 4))
+    else:
+        p2 = tl.broadcast_to((lanes ^ 2)[:, None], (4, 4))
+        p1 = tl.broadcast_to((lanes ^ 1)[:, None], (4, 4))
+    pair = x + tl.gather(x, p2, axis)
+    return pair + tl.gather(pair, p1, axis)
+
+
+@triton.jit
+def _hc_reference_kernel(
+    X, S, B, Pre, Post, Comb, ITERS: tl.constexpr, EPS: tl.constexpr
+):
+    token = tl.program_id(0)
+    cols = tl.arange(0, 4)
+    s0, s1, s2 = tl.load(S), tl.load(S + 1), tl.load(S + 2)
+    pre = tl.load(X + token * 24 + cols) * s0 + tl.load(B + cols)
+    post = tl.load(X + token * 24 + cols + 4) * s1 + tl.load(B + cols + 4)
+    pre = tl.div_rn(1.0, 1.0 + tl_extra_shim.exp(-pre)) + EPS
+    post = 2.0 * tl.div_rn(1.0, 1.0 + tl_extra_shim.exp(-post))
+    tl.store(Pre + token * 4 + cols, pre)
+    tl.store(Post + token * 4 + cols, post)
+    offsets = cols[:, None] * 4 + cols[None, :]
+    comb = tl.load(X + token * 24 + offsets + 8) * s2 + tl.load(B + offsets + 8)
+    comb = tl_extra_shim.exp(comb - tl.max(comb, 1)[:, None])
+    comb = tl.div_rn(comb, _hc_sum4(comb, 1)) + EPS
+    comb = tl.div_rn(comb, _hc_sum4(comb, 0) + EPS)
+    for _ in range(ITERS - 1):
+        comb = tl.div_rn(comb, _hc_sum4(comb, 1) + EPS)
+        comb = tl.div_rn(comb, _hc_sum4(comb, 0) + EPS)
+    tl.store(Comb + token * 16 + offsets, comb)
+
+
+def hc_split_sinkhorn_reference(
+    mixes, scale, base, hc_mult=4, sinkhorn_iters=20, eps=1e-6
+):
+    """FP32 four-stream mHC with precise exp/div and a fixed reduction tree.
+
+    The published graph is sensitive to sub-ULP changes in these coefficients:
+    BF16 residual rounding and expert selection can amplify them over 40 layers.
+    This compatibility operator deliberately prioritizes that numerical contract.
+    """
+    if (
+        hc_mult != 4
+        or mixes.shape[-1] != 24
+        or scale.shape != (3,)
+        or base.shape != (24,)
+    ):
+        raise ValueError("expected four-stream mHC mixes[...,24], scale[3], base[24]")
+    if sinkhorn_iters < 1 or not math.isfinite(eps) or eps <= 0:
+        raise ValueError("positive iterations and finite positive epsilon are required")
+    if any(
+        t.dtype != torch.float32 or t.device != mixes.device
+        for t in (mixes, scale, base)
+    ):
+        raise ValueError("all mHC inputs must be FP32 on the same device")
+    if not all(t.is_contiguous() for t in (mixes, scale, base)):
+        raise ValueError("mHC inputs must be contiguous")
+    shape = mixes.shape[:-1]
+    pre = torch.empty((*shape, 4), device=mixes.device, dtype=torch.float32)
+    post = torch.empty_like(pre)
+    comb = torch.empty((*shape, 4, 4), device=mixes.device, dtype=torch.float32)
+    if mixes.numel():
+        _hc_reference_kernel[(mixes.numel() // 24,)](
+            mixes,
+            scale,
+            base,
+            pre,
+            post,
+            comb,
+            sinkhorn_iters,
+            eps,
+            num_warps=1,
+            enable_fp_fusion=True,
+        )
+    return pre, post, comb
 
 
 @libentry()
@@ -167,17 +250,21 @@ def _sparse_sink_kernel(
         scores = tl.dot(q, tl.trans(kv)).to(tl.float32) * SCALE
         scores = tl.where(valid[None, :], scores, -float("inf"))
         new_max = tl.maximum(maxima, tl.max(scores, 1))
-        rescale = tl.exp(maxima - new_max)
-        prob = tl.exp(scores - new_max[:, None])
-        total = total * rescale + tl.sum(prob, 1)
+        rescale = tl_extra_shim.exp(maxima - new_max)
+        prob = tl_extra_shim.exp(scores - new_max[:, None])
+        if BH == 16:
+            # The 16-head reference sums adjacent pairs, then eight column
+            # groups, then four pairs. Preserve FP32 association before BF16 PV.
+            block_sum = tl.sum(tl.sum(tl.sum(prob.reshape(BH, 8, 4, 2), 3), 1), 1)
+        else:
+            block_sum = tl.sum(prob, 1)
+        total = total * rescale + block_sum
         acc = acc * rescale[:, None]
-        acc += tl.dot(prob.to(q.dtype), kv)
+        acc = tl.dot(prob.to(q.dtype), kv, acc)
         maxima = new_max
     sink = tl.load(Sink + heads, heads < H, 0.0).to(tl.float32)
-    final_max = tl.maximum(maxima, sink)
-    rescale = tl.exp(maxima - final_max)
-    denom = total * rescale + tl.exp(sink - final_max)
-    result = tl.where(denom[:, None] > 0, acc * rescale[:, None] / denom[:, None], 0.0)
+    denom = total + tl_extra_shim.exp(sink - maxima)
+    result = tl.where(denom[:, None] > 0, tl.div_rn(acc, denom[:, None]), 0.0)
     tl.store(
         Out + ((batch * S + token) * H + heads[:, None]) * D + dims[None, :],
         result,
@@ -234,6 +321,6 @@ def sparse_attention_with_sink(q, kv, attn_sink, indices, softmax_scale):
             max(16, triton.next_power_of_2(h)),
             64,
             num_warps=8 if h >= 32 or d == 512 else 4,
-            enable_fp_fusion=False,
+            enable_fp_fusion=True,
         )
     return out

@@ -4,8 +4,26 @@ import torch
 
 from flag_gems.fused.dsv41_reference_ops import (
     fp4_quantize_reference,
+    hc_split_sinkhorn_reference,
     sparse_attention_with_sink,
 )
+
+
+@pytest.mark.parametrize("rows", [0, 1, 7, 33])
+@pytest.mark.parametrize("iterations,eps", [(1, 1e-6), (20, 1e-6), (20, 1e-4)])
+def test_hc_precise_reference_and_repeat(rows, iterations, eps):
+    from flag_gems.fused.mhc.hc_split_sinkhorn import mhc_split_sinkhorn_torch_ref
+
+    torch.manual_seed(41)
+    mixes = torch.randn(1, rows, 24, device="cuda") * 4
+    scale = torch.tensor([0.7, 1.3, 2.1], device="cuda")
+    base = torch.randn(24, device="cuda")
+    expected = mhc_split_sinkhorn_torch_ref(mixes, scale, base, 4, iterations, eps)
+    actual = hc_split_sinkhorn_reference(mixes, scale, base, 4, iterations, eps)
+    repeated = hc_split_sinkhorn_reference(mixes, scale, base, 4, iterations, eps)
+    for a, e, r in zip(actual, expected, repeated):
+        torch.testing.assert_close(a, e, atol=1e-6, rtol=2e-6)
+        torch.testing.assert_close(a, r, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("scale_format,group", [("e8m0", 32), ("e4m3", 16)])

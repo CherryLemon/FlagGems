@@ -44,6 +44,7 @@ from flag_gems.fused.DSA.mxfp4_mqa_logits import (
 from flag_gems.fused.DSA.sparse_mla import triton_sparse_mla_fwd_interface
 from flag_gems.fused.dsv41_reference_ops import (
     fp4_quantize_reference,
+    hc_split_sinkhorn_reference,
     sparse_attention_with_sink,
 )
 from flag_gems.fused.FLA import (
@@ -169,6 +170,7 @@ __all__ = [
     "grouped_topk",
     "hc_head_fused_kernel",
     "hc_head_fused_kernel_ref",
+    "hc_split_sinkhorn_reference",
     "indexer_k_quant_and_cache",
     "inplace_fused_experts",
     "instance_norm",
