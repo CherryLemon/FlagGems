@@ -18,6 +18,7 @@ from flag_gems.fused.apply_repetition_penalties import apply_repetition_penaltie
 from flag_gems.fused.beam_search_score import beam_search_score, beam_search_score_
 from flag_gems.fused.bf16_paged_mqa_logits import bf16_paged_mqa_logits
 from flag_gems.fused.bincount import bincount
+from flag_gems.fused.block_scaled_lowp_linear import block_scaled_lowp_linear
 from flag_gems.fused.chunk_gated_delta_rule import chunk_gated_delta_rule
 from flag_gems.fused.concat_and_cache_mla import concat_and_cache_mla
 from flag_gems.fused.cp_gather_indexer_k_quant_cache import (
@@ -36,7 +37,15 @@ from flag_gems.fused.deepseek_v4_attention_dequantize_and_gather_k_cache import 
 )
 from flag_gems.fused.deepseek_v4_attention_fused_q_kv_rmsnorm import fused_q_kv_rmsnorm
 from flag_gems.fused.DSA.bin_topk import bucket_sort_topk
+from flag_gems.fused.DSA.mxfp4_mqa_logits import (
+    mxfp4_paged_index_logits,
+    mxfp4_workspace_index_logits,
+)
 from flag_gems.fused.DSA.sparse_mla import triton_sparse_mla_fwd_interface
+from flag_gems.fused.dsv41_reference_ops import (
+    fp4_quantize_reference,
+    sparse_attention_with_sink,
+)
 from flag_gems.fused.FLA import (
     chunk_gated_delta_rule_fwd,
     fused_recurrent_gated_delta_rule_fwd,
@@ -116,14 +125,15 @@ from flag_gems.fused.unpack_seq import unpack_seq_triton
 from flag_gems.fused.weight_norm import weight_norm
 
 __all__ = [
-    "add_rms_norm",
     "act_quant_triton",
+    "add_rms_norm",
     "apply_repetition_penalties",
     "apply_rotary_pos_emb",
     "beam_search_score",
     "beam_search_score_",
     "bf16_paged_mqa_logits",
     "bincount",
+    "block_scaled_lowp_linear",
     "bucket_sort_topk",
     "chunk_gated_delta_rule",
     "chunk_gated_delta_rule_fwd",
@@ -141,6 +151,7 @@ __all__ = [
     "flash_mla",
     "flash_mla_sparse_fwd",
     "flash_mla_with_kvcache",
+    "fp4_quantize_reference",
     "fp8_fp4_mega_moe",
     "fp8_fp4_mega_moe_torch_ref",
     "fp8_fp4_mqa_logits",
@@ -172,6 +183,8 @@ __all__ = [
     "moe_align_block_size_triton",
     "moe_sum",
     "mrope",
+    "mxfp4_paged_index_logits",
+    "mxfp4_workspace_index_logits",
     "outer",
     "outplace_fused_experts",
     "pack_seq_triton",
@@ -187,6 +200,7 @@ __all__ = [
     "silu_and_mul_with_clamp_out",
     "sinkhorn_forward",
     "skip_layer_norm",
+    "sparse_attention_with_sink",
     "sparse_attn_triton",
     "stage_deepseek_v4_mega_moe_inputs",
     "swiglu",

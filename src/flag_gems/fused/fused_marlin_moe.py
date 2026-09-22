@@ -72,10 +72,12 @@ MVP scope:
   - activation: SwiGLU / SiLU
   - act_order:  NOT supported (g_idx / sort_indices must be None)
   - FP8 input:  NOT supported
-  - LoRA, clamp_limit, expert_map: NOT supported
+  - clamp_limit: supported for MXFP4 (separate clamped activation)
+  - LoRA, expert_map: NOT supported for the MXFP4 path
 """
 
 import functools
+import math
 from enum import IntEnum
 from typing import Any, Callable, NamedTuple, Optional, Tuple
 
@@ -101,6 +103,7 @@ from flag_gems.fused.moe_align_block_size import (
 )
 from flag_gems.fused.moe_sum import moe_sum
 from flag_gems.fused.silu_and_mul import silu_and_mul_out
+from flag_gems.fused.silu_and_mul_with_clamp import silu_and_mul_with_clamp_out
 from flag_gems.utils import libentry, libtuner
 
 # ----------------------------------------------------------------------------
@@ -327,9 +330,9 @@ _SCALE_PACK_CACHE_E8M0_FOLD: WeakTensorKeyDictionary = WeakTensorKeyDictionary()
 def _pack_w_interleave(w: torch.Tensor, block_size_k: int) -> torch.Tensor:
     assert w.dtype == torch.uint8
     assert w.ndim == 3
-    assert (
-        block_size_k % 8 == 0
-    ), f"BLOCK_SIZE_K={block_size_k} must be multiple of 8 (8 logical K per int32)"
+    assert block_size_k % 8 == 0, (
+        f"BLOCK_SIZE_K={block_size_k} must be multiple of 8 (8 logical K per int32)"
+    )
     E, N_out, K_half = w.shape
     K = K_half * 2
     B = block_size_k // 8
@@ -2024,6 +2027,7 @@ def fused_marlin_moe_w4a16_mxfp4(
     apply_router_weight_on_input: bool = False,
     inplace: bool = False,
     swap_ab: bool = True,
+    clamp_limit: Optional[float] = None,
 ) -> torch.Tensor:
     """MXFP4 (W4A16) fused MoE. Weights: w1 (E, 2N, K//2) / w2 (E, K, N//2) uint8,
     two FP4 (E2M1) per byte; scales E8M0 (float8_e8m0fnu), per-32 group."""
@@ -2032,6 +2036,8 @@ def fused_marlin_moe_w4a16_mxfp4(
     assert hidden_states.is_contiguous()
     assert w1.dtype == torch.uint8 and w2.dtype == torch.uint8
     assert w1.stride(-1) == 1 and w2.stride(-1) == 1
+    if clamp_limit is not None and (not math.isfinite(clamp_limit) or clamp_limit <= 0):
+        raise ValueError("clamp_limit must be finite and positive, or None")
 
     M = hidden_states.size(0)
     K = hidden_states.size(1)
@@ -2049,6 +2055,8 @@ def fused_marlin_moe_w4a16_mxfp4(
     assert w1_scale.shape == (E, 2 * intermediate_size, K // group_size)
     assert w2_scale.shape == (E, K, intermediate_size // group_size)
     assert topk_weights.shape == topk_ids.shape
+    if M == 0:
+        return hidden_states if inplace else torch.empty_like(hidden_states)
 
     compute_type = tl.float16 if hidden_states.dtype == torch.float16 else tl.bfloat16
 
@@ -2078,7 +2086,9 @@ def fused_marlin_moe_w4a16_mxfp4(
         swap_ab,
     )
     block_m = policy.block_m
-    use_fused_gemm1_silu = policy.use_fused_gemm1_silu
+    # The fused epilogue does not implement DeepSeek's asymmetric clamp.
+    # Preserve the GEMM's output rounding before the clamped activation.
+    use_fused_gemm1_silu = policy.use_fused_gemm1_silu and clamp_limit is None
 
     cache13_size = M * top_k_num * K
     if not use_fused_gemm1_silu:
@@ -2146,7 +2156,10 @@ def fused_marlin_moe_w4a16_mxfp4(
 
         gate = intermediate_cache1[:, :intermediate_size]
         up = intermediate_cache1[:, intermediate_size:]
-        silu_and_mul_out(gate, up, intermediate_cache2)
+        if clamp_limit is None:
+            silu_and_mul_out(gate, up, intermediate_cache2)
+        else:
+            silu_and_mul_with_clamp_out(gate, up, intermediate_cache2, clamp_limit)
 
     _invoke_w4a16_mxfp4_moe_gemm(
         A=intermediate_cache2,
@@ -2204,12 +2217,12 @@ def _fused_marlin_moe_impl(
       - REMOVES the `w = w.to(fp16) * scale.unsqueeze(-1)` dequant shortcut.
       - forwards block_shape so the wna16 kernel uses the right group_size.
     """
-    assert (
-        activation == "silu"
-    ), f"Only 'silu' activation is supported, got {activation}"
-    assert (
-        use_int4_w4a16 or use_int8_w8a16
-    ), "_fused_marlin_moe_impl expects a quantized path"
+    assert activation == "silu", (
+        f"Only 'silu' activation is supported, got {activation}"
+    )
+    assert use_int4_w4a16 or use_int8_w8a16, (
+        "_fused_marlin_moe_impl expects a quantized path"
+    )
 
     activation_enum = MoEActivation.from_str(activation)
 
@@ -2479,8 +2492,8 @@ def fused_marlin_moe(
         raise NotImplementedError("act_order (sort_indices) not yet supported in MVP")
     if input_dtype is not None:
         raise NotImplementedError("FP8 / INT8 input quantization not supported")
-    if clamp_limit is not None:
-        raise NotImplementedError("clamp_limit (GLM-4 swiglu) not supported")
+    if clamp_limit is not None and quant_type_id not in _QUANT_TYPE_FP4:
+        raise NotImplementedError("clamp_limit is currently supported only for MXFP4")
     if input_global_scale1 is not None or input_global_scale2 is not None:
         raise NotImplementedError("input_global_scale not supported in MVP")
     if global_scale1 is not None or global_scale2 is not None:
@@ -2573,6 +2586,7 @@ def fused_marlin_moe(
             group_size=group_size,
             apply_router_weight_on_input=apply_router_weight_on_input,
             inplace=inplace,
+            clamp_limit=clamp_limit,
         )
         if output is not None:
             output.copy_(result)

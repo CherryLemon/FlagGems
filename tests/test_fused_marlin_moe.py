@@ -191,9 +191,9 @@ def _quantize_moe_weight(w_fp, group_size):
         scales: (E, out_dim, in_dim // group_size), same dtype as w_fp
     """
     E, out_dim, in_dim = w_fp.shape
-    assert (
-        in_dim % group_size == 0
-    ), f"in_dim={in_dim} not divisible by group_size={group_size}"
+    assert in_dim % group_size == 0, (
+        f"in_dim={in_dim} not divisible by group_size={group_size}"
+    )
 
     w_q = torch.empty(E, out_dim, in_dim // 2, device=w_fp.device, dtype=torch.uint8)
     w_ref = torch.empty_like(w_fp)
@@ -230,9 +230,9 @@ def _quantize_moe_weight_int8(w_fp, group_size):
         scales: (E, out_dim, in_dim // group_size), same dtype as w_fp
     """
     E, out_dim, in_dim = w_fp.shape
-    assert (
-        in_dim % group_size == 0
-    ), f"in_dim={in_dim} not divisible by group_size={group_size}"
+    assert in_dim % group_size == 0, (
+        f"in_dim={in_dim} not divisible by group_size={group_size}"
+    )
     w_q = torch.empty(E, out_dim, in_dim, device=w_fp.device, dtype=torch.uint8)
     w_ref = torch.empty_like(w_fp)
     scales = torch.empty(
@@ -623,6 +623,55 @@ def test_fused_marlin_moe_w4a16_mxfp4(config, dtype):
 
     max_diff = compute_max_diff(result.float(), ref)
     assert max_diff < 0.04, f"max_diff={max_diff:.4f}"
+
+
+@pytest.mark.skipif(not _is_hopper(), reason="MXFP4 GEMM currently requires Hopper")
+@pytest.mark.parametrize("tokens", [0, 1, 7, 32])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_mxfp4_clamp_preserves_asymmetric_gate_and_up_bounds(tokens, dtype):
+    """Exercise both clamp signs and GEMM materialization, including empty ranks."""
+    hs, w1, w2, ref1, ref2, weights, ids, s1, s2 = _make_inputs_w4a16_mxfp4(
+        tokens, 4, 128, 128, 2, dtype, flag_gems.device
+    )
+    # The default small inputs do not activate the model's clamp at 10.
+    hs = (hs * 100).contiguous()
+    out = fused_marlin_moe(
+        hidden_states=hs,
+        w1=w1,
+        w2=w2,
+        bias1=None,
+        bias2=None,
+        w1_scale=s1,
+        w2_scale=s2,
+        topk_weights=weights,
+        topk_ids=ids,
+        quant_type_id=QUANT_TYPE_FP4_E2M1,
+        group_size=32,
+        clamp_limit=10.0,
+    )
+    partial = torch.zeros(tokens, 2, 128, device=hs.device, dtype=dtype)
+    clamped = False
+    for row in range(tokens):
+        for route in range(2):
+            expert = int(ids[row, route])
+            gate_up = (ref1[expert].float() @ hs[row].float()).to(dtype).float()
+            gate, up = gate_up.chunk(2)
+            clamped |= bool((gate > 10).any() or (up.abs() > 10).any())
+            act = (torch.nn.functional.silu(gate.clamp(max=10)) * up.clamp(-10, 10)).to(
+                dtype
+            )
+            partial[row, route] = (
+                (ref2[expert].float() @ act.float()) * weights[row, route].float()
+            ).to(dtype)
+    expected = partial.float().sum(1).to(dtype)
+    assert clamped or tokens == 0
+    # Two rounded GEMMs and SiLU can differ by a BF16 output ULP.
+    torch.testing.assert_close(
+        out,
+        expected,
+        atol=0.125 if dtype == torch.bfloat16 else 0.016,
+        rtol=0.008 if dtype == torch.bfloat16 else 0.001,
+    )
 
 
 # -----------------------------------------------------------------------------
