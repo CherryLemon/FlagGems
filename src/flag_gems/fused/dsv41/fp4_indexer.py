@@ -151,7 +151,8 @@ def _fp4_index_logits_kernel(
         mask=valid[:, None],
         other=127,
     )
-    scale = tl.exp2(exps.to(tl.float32) - 127.0)
+    # UE8M0 reserves 255 for NaN; it is not a finite power-of-two scale.
+    scale = tl.where(exps == 255, float("nan"), tl.exp2(exps.to(tl.float32) - 127.0))
     k_low = (low * scale).to(tl.bfloat16)  # [BLOCK_L, HALF_D] elements 2i
     k_high = (high * scale).to(tl.bfloat16)  # elements 2i+1
 
@@ -236,7 +237,8 @@ def _fp4_group_load_keys(
         valid[:, None],
         other=127,
     )
-    scale = tl.exp2(exps.to(tl.float32) - 127.0)
+    # UE8M0 reserves 255 for NaN; it is not a finite power-of-two scale.
+    scale = tl.where(exps == 255, float("nan"), tl.exp2(exps.to(tl.float32) - 127.0))
     return ((low * scale).to(tl.bfloat16), (high * scale).to(tl.bfloat16))
 
 
@@ -734,7 +736,8 @@ def _unpack_fp4_index_keys_to_fp8_kernel(
         + off * SCALE_BYTES
         + scale_block
     )
-    scale = tl.exp2(exps.to(tl.float32) - 127.0)
+    # UE8M0 reserves 255 for NaN; it is not a finite power-of-two scale.
+    scale = tl.where(exps == 255, float("nan"), tl.exp2(exps.to(tl.float32) - 127.0))
     low = tl.clamp(_e2m1_decode(pay & 0x0F) * scale, -FP8_MAX, FP8_MAX).to(
         out_ptr.dtype.element_ty
     )
