@@ -93,6 +93,9 @@ def _quantize_to_mxfp4(x):
     code = torch.where(abs_x >= 3.5, 6, code)
     code = torch.where(abs_x > 5.0, 7, code)
     sign = ((x_scaled.view(torch.int32) >> 31) & 1).to(torch.uint8)
+    if not _supports_mxfp4_ptx():
+        # Branch software contract canonicalizes values rounded to signed zero.
+        sign = torch.where(code != 0, sign, 0)
     nibble = code.to(torch.uint8) | (sign << 3)
 
     nibble_flat = nibble.reshape(-1, head_dim)
@@ -116,9 +119,6 @@ def _reference_mxfp4(q_rot, weights, softmax_scale, head_scale):
 @pytest.mark.parametrize("use_fp4", [False, True])
 @torch.inference_mode()
 def test_fused_indexer_q_rope_quant(num_tokens, cache_dtype, use_fp4):
-    if use_fp4 and not _supports_mxfp4_ptx():
-        pytest.skip("MXFP4 E2M1 PTX conversion requires sm100 or newer")
-
     device = flag_gems.device
     torch.manual_seed(0)
 

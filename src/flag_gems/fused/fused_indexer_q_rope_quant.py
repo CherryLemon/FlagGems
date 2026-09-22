@@ -24,27 +24,58 @@ def _get_cos_sin(
     return cos, sin
 
 
+# Finite-input software packing from CherryLemon/vllm a9e3d217cce0.
+# E2M1 PTX conversion is unavailable on Hopper; integer packing is portable.
 @triton.jit
-def _fp32x2_to_fp4x2(x_lo, x_hi):
-    # NOTE: $1 is high nibble, $2 is low nibble
-    return tl.inline_asm_elementwise(
-        """
-        {
-            .reg .b8 tmp;
-            cvt.rn.satfinite.e2m1x2.f32 tmp, $1, $2;
-            cvt.u32.u8 $0, tmp;
-        }
-        """,
-        constraints="=r,f,f",
-        args=[x_hi, x_lo],
-        dtype=tl.uint32,
-        is_pure=True,
-        pack=1,
-    ).to(tl.uint8)
+def _fp32_to_e2m1_code_rne(x):
+    """E2M1 round-to-nearest-even code (sign in bit 3) for |x| <= 6.
+
+    The E2M1 magnitude grid is 0, .5, 1, 1.5, 2, 3, 4, 6; this counts how many
+    thresholds ``ax >=`` are crossed and then drops an odd index sitting exactly
+    on a halfway point back to the even one.  Equivalent to the hardware
+    ``cvt.rn.satfinite.e2m1x2`` for the in-range, finite inputs produced by the
+    MXFP4 scaling (which never saturates: ``amax / scale <= 6`` by construction).
+    """
+    ax = tl.minimum(tl.abs(x), 6.0)
+    idx = (ax >= 0.25).to(tl.uint8)
+    idx += (ax >= 0.75).to(tl.uint8)
+    idx += (ax >= 1.25).to(tl.uint8)
+    idx += (ax >= 1.75).to(tl.uint8)
+    idx += (ax >= 2.5).to(tl.uint8)
+    idx += (ax >= 3.5).to(tl.uint8)
+    idx += (ax >= 5.0).to(tl.uint8)
+    is_boundary = (
+        (ax == 0.25)
+        | (ax == 0.75)
+        | (ax == 1.25)
+        | (ax == 1.75)
+        | (ax == 2.5)
+        | (ax == 3.5)
+        | (ax == 5.0)
+    )
+    idx = tl.where(is_boundary & ((idx & 1) == 1), idx - 1, idx)
+    sign = ((x < 0) & (idx != 0)).to(tl.uint8)
+    return idx | (sign << 3)
 
 
 @triton.jit
-def _quantize_mxfp4_pair(x_lo, x_hi):
+def _fp32x2_to_fp4x2(x_lo, x_hi, USE_NATIVE_FP4: tl.constexpr = False):
+    if USE_NATIVE_FP4:
+        return tl.inline_asm_elementwise(
+            "{ .reg .b8 tmp; cvt.rn.satfinite.e2m1x2.f32 tmp, $1, $2; cvt.u32.u8 $0, tmp; }",
+            constraints="=r,f,f",
+            args=[x_hi, x_lo],
+            dtype=tl.uint32,
+            is_pure=True,
+            pack=1,
+        ).to(tl.uint8)
+    code_lo = _fp32_to_e2m1_code_rne(x_lo)
+    code_hi = _fp32_to_e2m1_code_rne(x_hi)
+    return (code_lo & 0x0F) | ((code_hi & 0x0F) << 4)
+
+
+@triton.jit
+def _quantize_mxfp4_pair(x_lo, x_hi, USE_NATIVE_FP4: tl.constexpr = False):
     """Quantize a block of MXFP4_BLOCK_SIZE fp32 values given as two
     interleaved halves (x_lo = values at even positions in the block,
     x_hi = values at odd positions). Returns:
@@ -61,7 +92,7 @@ def _quantize_mxfp4_pair(x_lo, x_hi):
     ue8m0 = (log2_ratio + 127.0).to(tl.uint8)
 
     inv_scale = 1.0 / scale
-    packed = _fp32x2_to_fp4x2(x_lo * inv_scale, x_hi * inv_scale)
+    packed = _fp32x2_to_fp4x2(x_lo * inv_scale, x_hi * inv_scale, USE_NATIVE_FP4)
     return packed, ue8m0
 
 
@@ -197,6 +228,7 @@ def _fused_indexer_q_rope_mxfp4_kernel(
     index_weights_head_scale,
     index_weights_out_ptr,
     index_weights_out_stride,
+    USE_NATIVE_FP4: tl.constexpr = False,
 ):
     INDEX_Q_ROT_DIM: tl.constexpr = 2 * INDEX_Q_HALF_ROT_DIM
     INDEX_Q_NOPE_DIM: tl.constexpr = INDEX_Q_HEAD_DIM - INDEX_Q_ROT_DIM
@@ -232,7 +264,7 @@ def _fused_indexer_q_rope_mxfp4_kernel(
         base = b * MXFP4_BLOCK
         x_lo = tl.load(q_base + base + half_off * 2).to(tl.float32)
         x_hi = tl.load(q_base + base + half_off * 2 + 1).to(tl.float32)
-        packed, ue8m0 = _quantize_mxfp4_pair(x_lo, x_hi)
+        packed, ue8m0 = _quantize_mxfp4_pair(x_lo, x_hi, USE_NATIVE_FP4)
         tl.store(out_base + base // 2 + half_off, packed)
         tl.store(scale_base + b, ue8m0)
 
@@ -257,7 +289,7 @@ def _fused_indexer_q_rope_mxfp4_kernel(
         # bf16 roundtrip for parity with the FP8 kernel / reference numerics.
         r_even = r_even.to(tl.bfloat16).to(tl.float32)
         r_odd = r_odd.to(tl.bfloat16).to(tl.float32)
-        packed, ue8m0 = _quantize_mxfp4_pair(r_even, r_odd)
+        packed, ue8m0 = _quantize_mxfp4_pair(r_even, r_odd, USE_NATIVE_FP4)
         rope_byte_off = (INDEX_Q_NOPE_DIM + b * MXFP4_BLOCK) // 2
         tl.store(out_base + rope_byte_off + half_off, packed)
         tl.store(scale_base + NUM_NOPE_BLOCKS + b, ue8m0)
@@ -328,14 +360,14 @@ def fused_indexer_q_rope_quant(
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
 
     if use_fp4:
-        if not index_q.is_cuda:
-            raise RuntimeError("MXFP4 fused_indexer_q_rope_quant requires CUDA")
-        major, _ = torch.cuda.get_device_capability(index_q.device)
-        if major < 10:
-            raise RuntimeError(
-                "MXFP4 fused_indexer_q_rope_quant requires sm100 or newer; "
-                f"got sm{major}x"
-            )
+        # Device queries happen at invocation, never during module import.
+        # Preserve Blackwell's native conversion; Hopper and other Triton
+        # backends use the branch's finite-input software RNE packer.
+        native_fp4 = (
+            index_q.device.type == "cuda"
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(index_q.device)[0] >= 10
+        )
         assert index_q_head_dim % MXFP4_BLOCK_SIZE == 0, (
             f"head_dim={index_q_head_dim} must be a multiple of MXFP4 block "
             f"size {MXFP4_BLOCK_SIZE}"
@@ -373,6 +405,7 @@ def fused_indexer_q_rope_quant(
             index_weights_head_scale,
             index_weights_out,
             index_weights_out.stride(0),
+            USE_NATIVE_FP4=native_fp4,
             num_warps=1,  # TODO: Tune this
         )
 

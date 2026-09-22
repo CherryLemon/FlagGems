@@ -37,6 +37,7 @@ from flag_gems.fused.deepseek_v4_attention_dequantize_and_gather_k_cache import 
 )
 from flag_gems.fused.deepseek_v4_attention_fused_q_kv_rmsnorm import fused_q_kv_rmsnorm
 from flag_gems.fused.DSA.bin_topk import bucket_sort_topk
+from flag_gems.fused.DSA.finalize_candidate_topk import finalize_candidate_topk
 from flag_gems.fused.DSA.mxfp4_mqa_logits import (
     mxfp4_paged_index_logits,
     mxfp4_workspace_index_logits,
@@ -149,6 +150,7 @@ __all__ = [
     "dispatch_fused_moe_kernel",
     "dreglu",
     "dswiglu",
+    "finalize_candidate_topk",
     "flash_mla",
     "flash_mla_sparse_fwd",
     "flash_mla_with_kvcache",
