@@ -3,7 +3,7 @@
 # Adapted from SGLang fp8_hopper_static.py, revision
 # 4cf6966fef013bccd7bbe4274df5132d7877b103 (Apache-2.0).
 # Keep each K32 dot and its independent scale application intact.
-"""Shape-specialized Hopper block FP8 GEMM with unchanged K-group arithmetic."""
+"""Hopper block FP8 GEMM and split-K reduction kernels."""
 
 import triton
 import triton.language as tl
@@ -134,71 +134,3 @@ def _reduce_split_k(
         P + parts[:, None] * SIZE + offsets[None, :], offsets[None, :] < SIZE, 0
     )
     tl.store(C + offsets, tl.sum(values, 0), offsets < SIZE)
-
-
-def hopper_block32_config(m, n, k):
-    # Initial serving envelope; other workloads retain the existing implementation.
-    rows = {
-        (1792, 5120): {144},
-        (16384, 1280): {120, 144},
-        (5120, 4096): {120, 144},
-        (576, 5120): {480, 576},
-    }
-    if m not in rows.get((n, k), ()):
-        return None
-    return dict(
-        BLOCK_SIZE_M=64,
-        BLOCK_SIZE_N=64,
-        BLOCK_SIZE_K=32,
-        GROUP_SIZE_M=1,
-        num_warps=4,
-        num_stages=3,
-        SWAP_AB=True,
-        SPLIT_K={(1792, 5120): 4, (16384, 1280): 1, (5120, 4096): 2, (576, 5120): 4}[
-            (n, k)
-        ],
-    )
-
-
-def matmul_hopper(A, B, As, Bs, C, config):
-    import torch
-
-    m, k = A.shape
-    n = B.shape[0]
-    splits = config["SPLIT_K"]
-    partials = (
-        torch.empty((splits, m, n), device=A.device, dtype=torch.float32)
-        if splits > 1
-        else C
-    )
-    grid = (
-        triton.cdiv(m, config["BLOCK_SIZE_M"]) * triton.cdiv(n, config["BLOCK_SIZE_N"]),
-        splits,
-    )
-    _w8a8_block_fp8_matmul_hopper[grid](
-        A,
-        B,
-        partials,
-        As,
-        Bs,
-        m,
-        n,
-        k,
-        32,
-        32,
-        A.stride(0),
-        A.stride(1),
-        B.stride(1),
-        B.stride(0),
-        C.stride(0),
-        C.stride(1),
-        As.stride(0),
-        As.stride(1),
-        Bs.stride(1),
-        Bs.stride(0),
-        needs_masking=bool(k % 32),
-        **config,
-    )
-    if splits > 1:
-        _reduce_split_k[(triton.cdiv(m * n, 256),)](partials, C, m * n, splits, 256)
-    return C
