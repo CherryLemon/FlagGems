@@ -118,6 +118,9 @@ def paged_index_scores(q, keys, weights, pages, lengths):
     q[B,S,H,D], keys[P,N,D], weights[B,S,H], visible lengths[B,S].
     The fixed output capacity is N; invisible entries are -inf. All request
     and position choices come from device metadata, not capture-time scalars.
+    V4.1 supplies Q/K already rounded to E2M1 with per-32 E8M0 scales and
+    decoded to BF16. Bitwise reference checks use that quantization contract;
+    arbitrary BF16 dots may differ from cuBLAS at an FP32 rounding tie.
     """
     if q.ndim != 4 or keys.ndim != 3:
         raise ValueError("expected q[B,S,H,D] and keys[P,N,D]")
