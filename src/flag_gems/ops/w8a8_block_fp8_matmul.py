@@ -205,6 +205,20 @@ def w8a8_block_fp8_matmul(
     if K == 0:
         return C.zero_()
 
+    if (
+        flag_gems.device == "cuda"
+        and A.ndim == 2
+        and (block_n, block_k) == (32, 32)
+        and A.dtype == B.dtype == torch.float8_e4m3fn
+        and output_dtype in (torch.bfloat16, torch.float32)
+        and torch.cuda.get_device_capability(A.device) == (9, 0)
+    ):
+        from ._w8a8_block_fp8_hopper import hopper_block32_config, matmul_hopper
+
+        hopper_config = hopper_block32_config(M, N, K)
+        if hopper_config is not None:
+            return matmul_hopper(A, B, As, Bs, C, hopper_config)
+
     configs = get_w8a8_block_fp8_configs(N, K, block_n, block_k)
     if configs:
         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]

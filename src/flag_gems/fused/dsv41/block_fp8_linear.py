@@ -50,6 +50,38 @@ def _quantize(
 
 
 @triton.jit
+def _quantize_groups(
+    X,
+    Q,
+    S,
+    NUM_GROUPS: tl.constexpr,
+    GROUP: tl.constexpr,
+    POW2: tl.constexpr,
+    GROUPS_PER_BLOCK: tl.constexpr,
+):
+    """Amortize block scheduling across independent quantization groups."""
+    groups = tl.program_id(0) * GROUPS_PER_BLOCK + tl.arange(0, GROUPS_PER_BLOCK)
+    offsets = groups[:, None] * GROUP + tl.arange(0, GROUP)[None, :]
+    x = tl.load(X + offsets, groups[:, None] < NUM_GROUPS, 0).to(tl.float32)
+    scale = tl.maximum(tl.max(tl.abs(x), 1), 1.0e-10) / 448.0
+    if POW2:
+        scale = tl.exp2(tl.ceil(tl.log2(scale)))
+    q = tl.minimum(tl.maximum(x / scale[:, None], -448.0), 448.0)
+    tl.store(Q + offsets, q, groups[:, None] < NUM_GROUPS)
+    tl.store(S + groups, scale, groups < NUM_GROUPS)
+
+
+def _quantize_group_config(num_groups):
+    # H100 / FlagTree 3.7 replay measurements: enough work per block without
+    # sacrificing parallelism on the small decode projections.
+    if num_groups >= 32768:
+        return 32, 1
+    if num_groups >= 8192:
+        return 64, 4
+    return 32, 4
+
+
+@triton.jit
 def _decode_e4m3(bits):
     exponent = ((bits >> 3) & 15).to(tl.int32)
     mantissa = (bits & 7).to(tl.float32)
@@ -148,9 +180,27 @@ def block_fp8_linear(
             dtype = torch.float8_e4m3fn if native_fp8 else torch.bfloat16
             q = torch.empty_like(rows, dtype=dtype)
             scales = torch.empty((m, k // bk), dtype=torch.float32, device=input.device)
-            _quantize[(m * (k // bk),)](
-                rows, q, scales, k, bk, act_scale_ue8m0, not native_fp8, num_warps=1
-            )
+            if (
+                native_fp8
+                and bk == 32
+                and torch.cuda.get_device_capability(input.device) == (9, 0)
+            ):
+                groups = m * (k // bk)
+                groups_per_block, warps = _quantize_group_config(groups)
+                _quantize_groups[(triton.cdiv(groups, groups_per_block),)](
+                    rows,
+                    q,
+                    scales,
+                    groups,
+                    bk,
+                    act_scale_ue8m0,
+                    groups_per_block,
+                    num_warps=warps,
+                )
+            else:
+                _quantize[(m * (k // bk),)](
+                    rows, q, scales, k, bk, act_scale_ue8m0, not native_fp8, num_warps=1
+                )
         else:
             if (
                 input.dtype != torch.float8_e4m3fn
