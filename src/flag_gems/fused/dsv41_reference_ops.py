@@ -228,6 +228,12 @@ def _sparse_sink_kernel(
     SCALE: tl.constexpr,
     BH: tl.constexpr,
     BK: tl.constexpr,
+    Compressed,
+    Pages,
+    PAGED: tl.constexpr,
+    WINDOW_STRIDE: tl.constexpr,
+    COMPRESSED_STRIDE: tl.constexpr,
+    COMPRESSED_N: tl.constexpr,
 ):
     token, batch = tl.program_id(0), tl.program_id(1)
     heads = tl.arange(0, BH)
@@ -243,10 +249,30 @@ def _sparse_sink_kernel(
     for start in range(tl.cdiv(K, BK)):
         slots = start * BK + tl.arange(0, BK)
         ids = tl.load(Idx + (batch * S + token) * K + slots, slots < K, -1)
-        valid = (ids >= 0) & (ids < N)
-        kv = tl.load(
-            KV + (batch * N + ids[:, None]) * D + dims[None, :], valid[:, None], 0.0
-        )
+        if PAGED:
+            page = tl.load(Pages + batch)
+            valid = (ids >= 0) & (ids < N + COMPRESSED_N)
+            window = tl.load(
+                KV + page * WINDOW_STRIDE + ids[:, None] * D + dims[None, :],
+                ((ids >= 0) & (ids < N))[:, None],
+                0.0,
+            )
+            compressed = tl.load(
+                Compressed
+                + page * COMPRESSED_STRIDE
+                + (ids[:, None] - N) * D
+                + dims[None, :],
+                ((ids >= N) & (ids < N + COMPRESSED_N))[:, None],
+                0.0,
+            )
+            kv = tl.where((ids < N)[:, None], window, compressed)
+        else:
+            valid = (ids >= 0) & (ids < N)
+            kv = tl.load(
+                KV + (batch * N + ids[:, None]) * D + dims[None, :],
+                valid[:, None],
+                0.0,
+            )
         scores = tl.dot(q, tl.trans(kv)).to(tl.float32) * SCALE
         scores = tl.where(valid[None, :], scores, -float("inf"))
         new_max = tl.maximum(maxima, tl.max(scores, 1))
@@ -320,7 +346,90 @@ def sparse_attention_with_sink(q, kv, attn_sink, indices, softmax_scale):
             softmax_scale,
             max(16, triton.next_power_of_2(h)),
             64,
+            kv,
+            indices,
+            False,
+            0,
+            0,
+            0,
+            num_stages=1,
             num_warps=8 if h >= 32 or d == 512 else 4,
+            enable_fp_fusion=True,
+        )
+    return out
+
+
+def paged_sparse_attention_with_sink(
+    q, window, compressed, attn_sink, indices, pages, softmax_scale
+):
+    """Read selected request pages directly, without concatenating full KV.
+
+    Window and compressed pools are [P,N,D], contiguous within a page; the
+    page stride can include other state fields. Indices address their logical
+    concatenation. Runtime page IDs are int64[B] and may change during replay.
+    Visibility (including padded queries) is encoded by -1 indices.
+    """
+    if q.ndim != 4 or window.ndim != 3 or indices.ndim != 3:
+        raise ValueError("expected q[B,S,H,D], window[P,W,D], indices[B,S,K]")
+    b, s, h, d = q.shape
+    if compressed is None:
+        compressed, compressed_n = window, 0
+    else:
+        compressed_n = compressed.shape[1]
+    if (
+        compressed.ndim != 3
+        or window.shape[0] != compressed.shape[0]
+        or window.shape[2] != d
+        or compressed.shape[2] != d
+        or pages.shape != (b,)
+        or pages.dtype != torch.int64
+        or indices.shape[:2] != (b, s)
+        or indices.dtype != torch.int32
+        or attn_sink.shape != (h,)
+        or attn_sink.dtype != torch.float32
+        or q.dtype != torch.bfloat16
+        or window.dtype != q.dtype
+        or compressed.dtype != q.dtype
+        or d not in (64, 128, 256, 512)
+        or not 0 < h <= 64
+        or not math.isfinite(softmax_scale)
+        or softmax_scale <= 0
+    ):
+        raise ValueError("incompatible paged sparse attention inputs")
+    if any(
+        t.device != q.device for t in (window, compressed, indices, pages, attn_sink)
+    ):
+        raise ValueError("all inputs must share a device")
+    if not all(t.is_contiguous() for t in (q, indices, pages, attn_sink)) or any(
+        t.stride()[1:] != (d, 1) for t in (window, compressed)
+    ):
+        raise ValueError(
+            "query/metadata and each individual KV page must be contiguous"
+        )
+    out = torch.empty_like(q)
+    if b * s:
+        _sparse_sink_kernel[(s, b)](
+            q,
+            window,
+            attn_sink,
+            indices,
+            out,
+            s,
+            h,
+            d,
+            window.shape[1],
+            indices.shape[2],
+            softmax_scale,
+            max(16, triton.next_power_of_2(h)),
+            64,
+            compressed,
+            pages,
+            True,
+            window.stride(0),
+            compressed.stride(0),
+            compressed_n,
+            num_warps=8 if h >= 32 or d == 512 else 4,
+            num_stages=1,
             enable_fp_fusion=True,
         )
     return out
