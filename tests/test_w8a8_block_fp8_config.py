@@ -48,7 +48,7 @@ def test_hopper_block32_configs_match_only_tuned_m(monkeypatch):
 
 def test_legacy_configs_keep_nearest_m():
     configs = {
-        32: {"BLOCK_SIZE_M": 32, "exact_m": False},
+        32: {"BLOCK_SIZE_M": 32},
         128: {"BLOCK_SIZE_M": 128, "exact_m": False},
         144: {"BLOCK_SIZE_M": 64, "exact_m": True, "kernel": "hopper"},
     }

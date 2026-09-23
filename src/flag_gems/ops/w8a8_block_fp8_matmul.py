@@ -229,7 +229,7 @@ def _select_w8a8_block_fp8_config(configs, M, block_n, block_k):
     if configs:
         if M in configs:
             return dict(configs[M])
-        approximate = {m: cfg for m, cfg in configs.items() if not cfg["exact_m"]}
+        approximate = {m: cfg for m, cfg in configs.items() if not cfg.get("exact_m", False)}
         if approximate:
             return dict(approximate[min(approximate, key=lambda m: abs(m - M))])
     return _get_default_w8a8_block_fp8_config(block_n, block_k)
