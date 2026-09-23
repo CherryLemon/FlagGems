@@ -168,7 +168,8 @@ def _fp4_index_logits_kernel(
     acc += tl.dot(q_odd, tl.trans(k_high))
     # reference rounding points: bf16 dot -> relu -> * bf16 weight -> bf16 -> sum -> bf16
     s = acc.to(tl.bfloat16).to(tl.float32)
-    s = tl.maximum(s, 0.0)
+    # torch.relu preserves NaN from reserved UE8M0 exponent 255.
+    s = tl.where(s != s, s, tl.maximum(s, 0.0))
     w = tl.load(w_ptr + b * stride_wb + offs_h).to(tl.float32)
     s = (s * w[:, None]).to(tl.bfloat16).to(tl.float32)
     logit = tl.sum(s, axis=0).to(tl.bfloat16).to(tl.float32)
@@ -296,7 +297,8 @@ def _fp4_group_score(
     qo = tl.load(Q + b * SQB + h[:, None] * SQH + 2 * i[None, :] + 1)
     acc = tl.dot(qe, tl.trans(KL))
     acc += tl.dot(qo, tl.trans(KH))
-    s = tl.maximum(acc.to(tl.bfloat16).to(tl.float32), 0.0)
+    s = acc.to(tl.bfloat16).to(tl.float32)
+    s = tl.where(s != s, s, tl.maximum(s, 0.0))
     w = tl.load(W + b * SWB + h).to(tl.float32)
     s = (s * w[:, None]).to(tl.bfloat16).to(tl.float32)
     logit = tl.sum(s, 0).to(tl.bfloat16).to(tl.float32)
@@ -876,7 +878,7 @@ def _fp8_index_logits_prefill_kernel(
     acc = tl.dot(q, tl.trans(k), out_dtype=tl.float32)
     # Preserve the reference post-dot rounding and reduction points.
     s = acc.to(tl.bfloat16).to(tl.float32)
-    s = tl.maximum(s, 0.0)
+    s = tl.where(s != s, s, tl.maximum(s, 0.0))
     w = tl.load(w_ptr + b * stride_wb + offs_h).to(tl.float32)
     s = (s * w[:, None]).to(tl.bfloat16).to(tl.float32)
     logit = tl.sum(s, axis=0).to(tl.bfloat16).to(tl.float32)
