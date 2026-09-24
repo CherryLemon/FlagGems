@@ -21,6 +21,12 @@ from .block_scaled_lowp_linear import _e2m1, _e8m0
 _GROUP_BN = 128
 
 
+def _grouped_moe_block_m(m):
+    # Small decode batches favor less padding; batched verification benefits
+    # from wider expert tiles on the strongly correlated serving routes.
+    return 16 if m < 16 else 32 if m < 256 else 64
+
+
 @triton.jit
 def _group_expert_pairs(
     IDS,
@@ -225,7 +231,7 @@ def block_scaled_mxfp4_moe(
     expert_ids, order = expert_ids.sort(dim=-1)
     routing_weights = routing_weights.gather(1, order)
     if implementation == "grouped":
-        pair_count, bm = m * top_k, 16
+        pair_count, bm = m * top_k, _grouped_moe_block_m(m)
         # Sum ceil(count_e/BM) <= ceil(P/BM) + E-1. Empty experts and
         # highly skewed routes fit this fixed, graph-safe upper bound.
         max_tiles = triton.cdiv(pair_count, bm) + local_count - 1
@@ -272,6 +278,7 @@ def block_scaled_mxfp4_moe(
                 n,
                 k,
                 first_stage,
+                BM=bm,
                 BN=_GROUP_BN,
                 num_warps=4,
                 enable_fp_fusion=False,
