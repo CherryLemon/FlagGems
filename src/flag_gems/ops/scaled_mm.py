@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import os
 
 import torch
 import triton
@@ -109,7 +110,10 @@ def scaled_mm_kernel(
                 mask=(offs_k[:, None] < k_remaining) & (offs_n[None, :] < N),
                 other=0.0,
             )
-        acc += tl.dot(a, b, out_dtype=ACC_DTYPE, allow_tf32=False)
+        if ACC_DTYPE == tl.int32:
+            acc = tl.dot(a, b, acc, out_dtype=ACC_DTYPE, allow_tf32=False)
+        else:
+            acc += tl.dot(a, b, out_dtype=ACC_DTYPE, allow_tf32=False)
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 
@@ -397,28 +401,79 @@ def _scaled_mm_impl(
                 GROUP_M=GROUP_M,
             )
         else:
-            scaled_mm_kernel[grid](
-                self,
-                mat2,
-                scale_a,
-                scale_b,
-                bias,
-                out,
-                M,
-                N,
-                K,
-                self.stride(0),
-                self.stride(1),
-                mat2.stride(0),
-                mat2.stride(1),
-                out.stride(0),
-                out.stride(1),
-                ACC_DTYPE=acc_dtype,
-                SCALE_A_MODE=scale_a_mode,
-                SCALE_B_MODE=scale_b_mode,
-                HAS_BIAS=bias is not None,
-                GROUP_M=GROUP_M,
-            )
+            # Optional, exact-shape INT8 tile candidate. Other dtypes and
+            # shapes continue through the installed autotuner unchanged.
+            i8_tile = None
+            if (
+                self.dtype == torch.int8
+                and runtime.device.vendor_name == "nvidia"
+                and os.getenv("FLAGGEMS_I8_SCALED_MM_SHAPE_TILES") == "1"
+                and torch.cuda.get_device_capability(self.device) == (9, 0)
+            ):
+                if M <= 64 and (K, N) == (6144, 1536):
+                    i8_tile = (16, 64, 128, 4, 3)
+                elif M in (4096, 5089, 8192) and (K, N) in (
+                    (6144, 1536),
+                    (1024, 6144),
+                    (6144, 3072),
+                    (1536, 6144),
+                    (6144, 768),
+                ):
+                    i8_tile = (32, 64, 256, 4, 3)
+            if i8_tile:
+                block_m, block_n, block_k, warps, stages = i8_tile
+                fixed_grid = (triton.cdiv(M, block_m) * triton.cdiv(N, block_n),)
+                scaled_mm_kernel.jit_function[fixed_grid](
+                    self,
+                    mat2,
+                    scale_a,
+                    scale_b,
+                    bias,
+                    out,
+                    M,
+                    N,
+                    K,
+                    self.stride(0),
+                    self.stride(1),
+                    mat2.stride(0),
+                    mat2.stride(1),
+                    out.stride(0),
+                    out.stride(1),
+                    ACC_DTYPE=acc_dtype,
+                    SCALE_A_MODE=scale_a_mode,
+                    SCALE_B_MODE=scale_b_mode,
+                    HAS_BIAS=bias is not None,
+                    BLOCK_M=block_m,
+                    BLOCK_N=block_n,
+                    BLOCK_K=block_k,
+                    GROUP_M=GROUP_M,
+                    EVEN_K=K % block_k == 0,
+                    num_warps=warps,
+                    num_stages=stages,
+                )
+            else:
+                scaled_mm_kernel[grid](
+                    self,
+                    mat2,
+                    scale_a,
+                    scale_b,
+                    bias,
+                    out,
+                    M,
+                    N,
+                    K,
+                    self.stride(0),
+                    self.stride(1),
+                    mat2.stride(0),
+                    mat2.stride(1),
+                    out.stride(0),
+                    out.stride(1),
+                    ACC_DTYPE=acc_dtype,
+                    SCALE_A_MODE=scale_a_mode,
+                    SCALE_B_MODE=scale_b_mode,
+                    HAS_BIAS=bias is not None,
+                    GROUP_M=GROUP_M,
+                )
     return out
 
 

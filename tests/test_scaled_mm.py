@@ -14,9 +14,9 @@
 
 import pytest
 import torch
-from packaging import version
 
 import flag_gems
+from packaging import version
 
 from . import accuracy_utils as utils
 from .conftest import QUICK_MODE
@@ -212,3 +212,33 @@ def test_scaled_mm_out(case):
 
     assert ret is out
     _assert_scaled_mm_close(out, ref, target_dtype, reduce_dim=K)
+
+
+@pytest.mark.scaled_mm
+@pytest.mark.parametrize(
+    "m,n,k",
+    [
+        (1, 1536, 6144),
+        (64, 1536, 6144),
+        (4096, 1536, 6144),
+        (5089, 3072, 6144),
+        (8192, 6144, 1024),
+        (4096, 6144, 1536),
+        (5089, 768, 6144),
+    ],
+)
+def test_hopper_opt_in_tiles(m, n, k, monkeypatch):
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("Hopper opt-in tiles")
+    torch.manual_seed(53)
+    a = torch.randint(-32, 32, (m, k), device="cuda", dtype=torch.int8)
+    # Row-major B selects the public Triton fallback, rather than the
+    # existing specialized scaled-MM entrypoint.
+    b = torch.randint(-32, 32, (k, n), device="cuda", dtype=torch.int8)
+    sa = torch.rand((m, 1), device="cuda") * 0.01
+    sb = torch.rand((1, n), device="cuda") * 0.01
+    bias = torch.randn((n,), device="cuda", dtype=torch.bfloat16)
+    monkeypatch.setenv("FLAGGEMS_I8_SCALED_MM_SHAPE_TILES", "1")
+    actual = flag_gems.scaled_mm(a, b, sa, sb, bias=bias, out_dtype=torch.bfloat16)
+    expected = _reference_scaled_mm(a, b, sa, sb, bias, torch.bfloat16)
+    torch.testing.assert_close(actual, expected, atol=0.03125, rtol=0.016)
