@@ -97,7 +97,9 @@ def test_int8_specialized_route_and_fp8_schema(monkeypatch):
         torch.ones((1, 32), device="cuda") * 0.01,
     )
     actual = flag_gems.scaled_mm_int8(a, b, sa, sb)
-    assert calls
+    # Only Hopper uses the specialized column-major entrypoint. Other CUDA
+    # architectures must keep the generic fallback and its numeric checks.
+    assert bool(calls) == (torch.cuda.get_device_capability(a.device)[0] == 9)
     expected = _reference_scaled_mm(a, b, sa, sb, None, torch.bfloat16)
     torch.testing.assert_close(actual, expected, rtol=0.016, atol=0.03125)
     with pytest.raises(RuntimeError, match="Float8"):
