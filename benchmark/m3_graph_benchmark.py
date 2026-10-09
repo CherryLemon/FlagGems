@@ -111,11 +111,11 @@ for m, k, n in (
 
     def baseline():
         os.environ["FLAGGEMS_I8_SCALED_MM_SHAPE_TILES"] = "0"
-        return flag_gems.scaled_mm(a, b, sa, sb, out_dtype=torch.bfloat16)
+        return flag_gems.scaled_mm_int8(a, b, sa, sb, out_dtype=torch.bfloat16)
 
     def candidate():
         os.environ["FLAGGEMS_I8_SCALED_MM_SHAPE_TILES"] = "1"
-        return flag_gems.scaled_mm(a, b, sa, sb, out_dtype=torch.bfloat16)
+        return flag_gems.scaled_mm_int8(a, b, sa, sb, out_dtype=torch.bfloat16)
 
     actual = candidate()
     expected = baseline()

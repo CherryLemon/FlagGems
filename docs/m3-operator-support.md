@@ -1,48 +1,80 @@
-# M3 general operator changes
+# M3 general operator performance
 
-## API and scope
+## Split from correctness support
 
-- `flag_gems.swiglu_oai(x, limit=7.0, alpha=1.702, beta=1.0)` is a forward inference primitive for split `[gate..., up...]` FP16/BF16 activations. Gate clamps above `limit`; up clamps to ±limit. Every former eager intermediate rounds to the input dtype. It supports strided 2D and contiguous higher-rank inputs, empty dimensions, finite scalar parameters, and NaN propagation. Backward and other dtypes/layouts are explicitly unsupported.
-- `FLAGGEMS_I8_SCALED_MM_SHAPE_TILES=1` selects opt-in INT8 tiles for the validated SM90 shape set. Uncovered shapes retain the autotuner. This applies to the generic Triton fallback; the existing specialized scaled-MM entrypoint retains priority. Default dispatch is unchanged.
+The MoE split OAI correctness patch is submitted separately as
+[FlagGems #6916](https://github.com/flagos-ai/FlagGems/pull/6916). This PR does
+not edit `fused_moe.py`, MoE activation parameters or quantization schedules.
+Both PRs target the same upstream base and can be applied independently.
 
-Fixed OAI launches preserve the validated staged arithmetic. Existing GEMM tuning remains available for uncovered inputs; the exact-shape opt-in is the stated tuning exception. There is no new Torch compute fallback.
+## API and contracts
+
+- `flag_gems.swiglu_oai(x, limit=7.0, alpha=1.702, beta=1.0)` fuses the staged
+  dense/shared split OAI chain. Every former eager intermediate rounds to the
+  FP16/BF16 input dtype. Strided 2D and contiguous higher-rank inputs, empties,
+  finite scalar parameters and NaN propagation are supported. This formula
+  has different rounding boundaries from the one-round MoE activation in the
+  separate correctness PR and must not replace it.
+- `flag_gems.scaled_mm_int8(a, b, scale_a, scale_b, bias=None,
+  out_dtype=torch.bfloat16)` is an explicit signed INT8 CUDA inference API
+  with K<=65536, contiguous scalar/per-row/per-column FP32 scales, optional
+  contiguous floating bias, FP16/BF16/FP32 output and strided matrices.
+  Current upstream's ATen `scaled_mm` is FP8-only and remains unchanged.
+  This explicit API retains the prior INT8 generic kernel and installed
+  `scaled_mm` autotuner configurations without altering ATen's schema.
+- The existing specialized column-major INT8 entrypoint retains priority.
+  `FLAGGEMS_I8_SCALED_MM_SHAPE_TILES=1` selects the validated exact-shape SM90
+  tiles only on the generic fallback. Other shapes keep autotuning; default
+  is off. Benchmarks below use row-major B and compare the same generic
+  kernel's installed autotuner against the fixed tile. They are not a claim
+  of an improvement to the specialized entrypoint.
+
+The fixed OAI schedule retains staged numerical boundaries; the exact-shape
+tile switch is a documented tuning exception. Both new APIs use Triton and
+metadata/empty allocations, with no Torch compute/copy/cast fallback.
+Unsupported dtypes/layouts/devices and backward use are rejected explicitly.
+Cross-backend INT8 execution has not been validated; the public API currently
+accepts CUDA only.
 
 ## Validation
 
-H100: 23 OAI tests and seven INT8 fallback tests passed. Coverage includes both OAI dtypes, parameter variants, odd intermediate widths, strided inputs, empties, NaN/Inf, explicit unsupported paths, changed CUDA Graph inputs, and BF16 output with bias/scales for all tile configurations. Autograd is not provided.
+On an isolated H100, 43 numerical cases passed: 23 staged OAI cases and 20
+INT8 cases covering the seven measured tile shapes, three output dtypes,
+empty/tail/strided matrices, changed CUDA Graph inputs, specialized-route
+priority, invalid scale/input dtypes, and unchanged FP8-only ATen validation.
+The two repository benchmark entrypoints and standalone two-round Graph
+script are checked separately. No serving speedup is inferred from these
+synthetic measurements.
 
 ## Synthetic performance
 
-CUDA Graph timing: 25 warmup calls, 100 captured calls, five CUDA-event samples per round, and two rounds with reversed baseline/candidate order. Values below are the mean of the two round medians; JSON preserves each sample and each round. OAI baseline is the complete staged Torch chain. INT8 baseline is the same generic Triton kernel through its existing autotuner, using row-major B. No checkpoint or model throughput data is used.
+25 warmup calls, 100 captured calls, five CUDA-event samples and two rounds
+with reversed order. Values are mean round medians. The JSON preserves raw
+samples and both rounds. OAI reference is the complete staged Torch chain;
+INT8 reference is the same generic INT8 kernel with existing autotuning.
 
 | Operator / shape | Baseline us | Candidate us | Speedup |
 |---|---:|---:|---:|
-| `swiglu_oai` [1, 384] | 9.450 | 1.128 | 8.378x |
-| `swiglu_oai` [64, 768] | 12.327 | 1.478 | 8.341x |
-| `swiglu_oai` [4096, 384] | 23.632 | 6.086 | 3.883x |
-| `swiglu_oai` [5089, 768] | 54.781 | 10.441 | 5.246x |
-| `swiglu_oai` [8192, 1536] | 176.188 | 31.887 | 5.525x |
-| `scaled_mm_hopper_row_major_fallback` [1, 6144, 1536] | 23.564 | 21.044 | 1.120x |
-| `scaled_mm_hopper_row_major_fallback` [64, 6144, 1536] | 23.834 | 20.680 | 1.153x |
-| `scaled_mm_hopper_row_major_fallback` [4096, 6144, 1536] | 430.839 | 402.177 | 1.071x |
-| `scaled_mm_hopper_row_major_fallback` [5089, 6144, 3072] | 1044.501 | 990.912 | 1.054x |
-| `scaled_mm_hopper_row_major_fallback` [8192, 1024, 6144] | 597.014 | 570.095 | 1.047x |
-| `scaled_mm_hopper_row_major_fallback` [4096, 1536, 6144] | 437.488 | 419.731 | 1.042x |
-| `scaled_mm_hopper_row_major_fallback` [5089, 6144, 768] | 273.730 | 257.377 | 1.064x |
+| `swiglu_oai` [1, 384] | 9.448 | 1.120 | 8.437x |
+| `swiglu_oai` [64, 768] | 12.293 | 1.496 | 8.219x |
+| `swiglu_oai` [4096, 384] | 23.650 | 6.087 | 3.886x |
+| `swiglu_oai` [5089, 768] | 54.868 | 10.424 | 5.263x |
+| `swiglu_oai` [8192, 1536] | 176.393 | 31.917 | 5.527x |
+| `scaled_mm_hopper_row_major_fallback` [1, 6144, 1536] | 23.577 | 21.101 | 1.117x |
+| `scaled_mm_hopper_row_major_fallback` [64, 6144, 1536] | 23.828 | 20.724 | 1.150x |
+| `scaled_mm_hopper_row_major_fallback` [4096, 6144, 1536] | 430.792 | 402.178 | 1.071x |
+| `scaled_mm_hopper_row_major_fallback` [5089, 6144, 3072] | 1044.888 | 990.681 | 1.055x |
+| `scaled_mm_hopper_row_major_fallback` [8192, 1024, 6144] | 596.975 | 570.162 | 1.047x |
+| `scaled_mm_hopper_row_major_fallback` [4096, 1536, 6144] | 437.427 | 419.757 | 1.042x |
+| `scaled_mm_hopper_row_major_fallback` [5089, 6144, 768] | 273.834 | 257.442 | 1.064x |
 
-For the normal transposed-weight specialized entrypoint, the opt-in is not selected: a separate check measured approximately 1.00x, as expected. The fallback result must not be claimed as a speedup for that entrypoint or as end-to-end serving performance.
-
-Reproduce numerical tests:
+## Reproduce
 
 ```sh
-PYTHONPATH=src python -m pytest -q tests/test_swiglu_oai.py
-PYTHONPATH=src python -m pytest -q tests/test_scaled_mm.py -k hopper_opt_in
-```
-
-Repository benchmarks include `benchmark/test_swiglu_oai.py` and the `test_int8_hopper_fallback` case in `benchmark/test_scaled_mm.py`. JSON above uses the explicit Graph protocol, so it is separate from the repository benchmark's default timing mode. Non-Hopper tile performance has not been validated; the opt-in is gated to SM90.
-
-The exact Graph timing protocol is runnable without serving artifacts:
-
-```sh
+VLLM_PLUGINS= PYTHONPATH=src python -m pytest -q tests/test_swiglu_oai.py tests/test_scaled_mm_int8.py
+VLLM_PLUGINS= PYTHONPATH=src python -m pytest -q benchmark/test_swiglu_oai.py benchmark/test_scaled_mm_int8.py --level core --warmup 1 --iter 2
 VLLM_PLUGINS= PYTHONPATH=src python benchmark/m3_graph_benchmark.py --output m3-operator-graph-results.json
 ```
+
+For INT8 serving integration, callers must explicitly select
+`scaled_mm_int8`; these PRs do not change any serving plugin dispatch.
