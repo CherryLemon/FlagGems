@@ -2412,6 +2412,18 @@ tensor into the caller-supplied `out` buffer.
   - NeuralNetwork
   stages:
   - alpha: '5.4'
+- id: bf16_small_m_linear
+  description: 'Experimental SM90 BF16 linear specialization for one to sixteen
+    rows, 1024 output columns and 6144 input columns. Direct opt-in API;
+    unsupported metadata raises ValueError. No bias or training contract.'
+  for:
+  - bf16_small_m_linear
+  labels:
+  - fused
+  kind:
+  - BLAS
+  stages:
+  - alpha: '5.5'
 - id: bilinear
   description: 'Applies a bilinear transformation to the incoming data: y = x1^T A
     x2 + b.
