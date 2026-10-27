@@ -73,6 +73,36 @@ have independent storage from the input and weight. Unsupported metadata raises
 before launch; callers select their original linear path before invoking the API.
 This explicit API does not replace aten linear or select a framework provider.
 
+## Packed INT8 indexer primitives
+
+`flag_gems.fused` exports `int8_indexer_quantize`, `int8_indexer_cache_store`
+and `int8_indexer_paged_logits`. They operate on tensors, with no framework
+objects or provider selection. The shared implementation uses Triton; no
+TileLang implementation is moved into this library.
+
+Quantization accepts finite FP16/BF16/FP32 unit-stride D128 heads whose leading
+dimensions collapse to rows without a copy. It returns signed INT8 values and
+FP32 power-of-two scales, using nearest-even rounding and a symmetric +/-127
+range. Cache-store consumes `[tokens,128]` keys and contiguous INT32/INT64
+physical slots; negative slots are ignored. Nonnegative write slots must be
+unique and smaller than cache capacity. A contiguous UINT8 cache page contains
+`page_size*128` signed key bytes followed by `page_size` FP32 scales, rather
+than interleaved records. The scale section must be FP32-aligned.
+
+Paged logits accept INT8 `[tokens,heads,128]`, FP32 weights `[tokens,heads]`,
+an integer page table and contiguous integer row-map/length vectors. The caller
+folds query scales into the weights. The operator computes the INT32 dot,
+ReLU, weighted head sum and then key scale, in that order. It returns fresh
+FP32 `[tokens,max_model_len]` logits; masked positions, negative page IDs and
+negative row mappings produce `-inf`. Nonnegative IDs and lengths must be
+within supplied storage. Request mapping, cache capacity, write ordering,
+causal lengths and TopK remain with the caller. Metadata failures raise before
+launch; launch failures propagate. These are inference-only GPU APIs.
+
+The three numerical kernels retain their previous implementation. Current
+package GPU/graph and whole-model qualification remain open; CPU reference,
+metadata and packaging checks do not establish them.
+
 ## Sample models for testing
 
 - Bert-base-uncased
