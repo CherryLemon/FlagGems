@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import flag_gems
-from flag_gems.fused.bf16_small_m_linear import bf16_small_m_linear
+from flag_gems.fused.bf16_small_m_linear import bf16_small_m_linear, supported_metadata
 
 
 def _require_sm90():
@@ -35,6 +35,7 @@ def test_bf16_small_m_linear_math_and_ordinary_graph(rows):
         x.copy_(cpu)
         eager = bf16_small_m_linear(x, weight, device_sm=90)
         expected = (cpu.double() @ cpu_w.double().T).float()
+        graph_out.fill_(torch.nan)
         graph.replay()
         torch.testing.assert_close(graph_out, eager, atol=0, rtol=0)
         torch.testing.assert_close(
@@ -50,3 +51,36 @@ def test_bf16_small_m_linear_rejects_unsupported_rows():
     weight = torch.empty((1024, 6144), dtype=x.dtype, device=x.device)
     with pytest.raises(ValueError, match="unsupported"):
         bf16_small_m_linear(x, weight, device_sm=90)
+
+
+@pytest.mark.bf16_small_m_linear
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"m": 0},
+        {"m": 17},
+        {"n": 512},
+        {"k": 4096},
+        {"input_dtype": "float16"},
+        {"weight_dtype": "float16"},
+        {"input_stride": (6145, 1)},
+        {"weight_stride": (1, 1024)},
+        {"device_sm": 80},
+        {"bias_present": True},
+        {"same_device": False},
+    ],
+)
+def test_bf16_small_m_linear_metadata_guards(changes):
+    metadata = dict(
+        m=4,
+        n=1024,
+        k=6144,
+        input_dtype="bfloat16",
+        weight_dtype="bfloat16",
+        input_stride=(6144, 1),
+        weight_stride=(6144, 1),
+        device_sm=90,
+    )
+    assert supported_metadata(**metadata)
+    metadata.update(changes)
+    assert not supported_metadata(**metadata)

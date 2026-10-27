@@ -114,6 +114,8 @@ def test_rms_norm_row_padding_and_ordinary_graph(
         storage.copy_(cpu)
         eager_y, eager_inv = rms_norm_forward(x, (columns,), weight)
         packed_y, packed_inv = rms_norm_forward(x.contiguous(), (columns,), weight)
+        graph_y.fill_(torch.nan)
+        graph_inv.fill_(torch.nan)
         graph.replay()
         torch.testing.assert_close(graph_y, eager_y, atol=0, rtol=0)
         torch.testing.assert_close(graph_inv, eager_inv, atol=0, rtol=0)

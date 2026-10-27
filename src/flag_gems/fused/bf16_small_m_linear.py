@@ -1,11 +1,9 @@
 # Copyright 2026, The FlagOS Contributors.
 # SPDX-License-Identifier: Apache-2.0
-"""Uninstalled SM90 BF16 small-M linear candidate; production default is OFF.
+"""Forward-only BF16 linear specialization for small-M SM90 inputs.
 
-The first experiment narrows the N tile from the traced 64 columns to 16.
-It keeps the complete K reduction in one CTA and retains the BF16 output
-boundary. No split-K, atomics, weight conversion, sigmoid fusion or router
-change is involved. This file is intended to live in FlagGems after validation.
+The bounded schedule retains the complete K reduction in one CTA and a BF16
+output boundary. The caller resolves device capability before graph capture.
 """
 
 from __future__ import annotations
@@ -78,9 +76,13 @@ def _linear_small_n_kernel(
 
 
 def bf16_small_m_linear(input, weight, *, device_sm, out=None):
-    """Candidate-only entry point; callers must check supported_metadata first."""
+    """Compute input @ weight.T for the supported inference domain.
+
+    Call with gradients disabled. Unsupported metadata raises before launch;
+    callers select their original linear implementation before invoking this API.
+    """
     if input.ndim != 2 or weight.ndim != 2:
-        raise ValueError("candidate requires 2-D input and weight")
+        raise ValueError("BF16 small-M linear requires 2-D input and weight")
     m, k = input.shape
     n = weight.shape[0]
     if (

@@ -62,6 +62,17 @@ Check the [features](https://flagos-ai.github.io/FlagGems/overview/features/) do
 - Refer to the [Getting Started](https://flagos-ai.github.io/FlagGems/getting-started/) for a quick start.
 - Refer to the [usage](https://flagos-ai.github.io/FlagGems/usage/) documentation for some details on using the software.
 
+## Explicit BF16 small-M linear
+
+`flag_gems.fused.bf16_small_m_linear(input, weight, *, device_sm, out=None)`
+computes a forward-only dense projection for contiguous CUDA BF16 input
+`[M, 6144]` and weight `[1024, 6144]`, `1 <= M <= 16`, on SM90. Call with
+gradients disabled and pass `device_sm=90`, resolved before graph capture.
+The optional `out` is contiguous BF16 `[M, 1024]` on the same device and must
+have independent storage from the input and weight. Unsupported metadata raises
+before launch; callers select their original linear path before invoking the API.
+This explicit API does not replace aten linear or select a framework provider.
+
 ## Sample models for testing
 
 - Bert-base-uncased
