@@ -32,3 +32,58 @@ def test_int8_indexer_cache_state(page_size, dtype):
     result = int8_indexer_cache_store(keys, cache, slots.cuda(), page_size)
     assert result is None
     assert torch.equal(cache.cpu(), expected)
+
+
+@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32"])
+@pytest.mark.parametrize("page_size", [16, 64])
+@torch.inference_mode()
+def test_public_cache_store_matches_same_exact_scales_and_slot_state(
+    dtype_name, page_size
+):
+    if not torch.cuda.is_available():
+        pytest.skip("GPU component test")
+    from flag_gems.fused.int8_sparse_indexer import int8_indexer_cache_store
+
+    from .int8_indexer_exact_oracle import adversarial_tensors
+
+    x_cpu, expected_q, expected_scales = adversarial_tensors(dtype_name)
+    rows = x_cpu.shape[0]
+    pages = (rows + page_size - 1) // page_size + 1
+    initial = torch.full((pages, page_size, 1, 132), 53, dtype=torch.uint8)
+    # Unique permuted destinations, explicit page-boundary writes and one
+    # negative slot. Compare complete cache bytes, not only the written scales.
+    slots = torch.arange(rows, dtype=torch.int64).flip(0)
+    slots[0] = -1
+
+    def expected_cache(q_values, scale_values):
+        result = initial.clone()
+        flat = result.view(pages, page_size * 132)
+        values = flat[:, : page_size * 128].view(torch.int8).view(pages, page_size, 128)
+        scales = flat[:, page_size * 128 :].view(torch.float32)
+        for row, slot in enumerate(slots.tolist()):
+            if slot >= 0:
+                page, offset = divmod(slot, page_size)
+                values[page, offset] = q_values[row]
+                scales[page, offset] = scale_values[row, 0]
+        return result
+
+    k = torch.empty_strided(x_cpu.shape, (135, 1), dtype=x_cpu.dtype, device="cuda")
+    k.copy_(x_cpu)
+    cache, gpu_slots = initial.cuda(), slots.cuda()
+    int8_indexer_cache_store(k, cache, gpu_slots, page_size)
+    assert torch.equal(cache.cpu(), expected_cache(expected_q, expected_scales))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.stream(stream):
+        int8_indexer_cache_store(k, cache, gpu_slots, page_size)
+        with torch.cuda.graph(graph, stream=stream):
+            int8_indexer_cache_store(k, cache, gpu_slots, page_size)
+    torch.cuda.current_stream().wait_stream(stream)
+    k.copy_(x_cpu.flip(0))
+    cache.copy_(initial)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(
+        cache.cpu(), expected_cache(expected_q.flip(0), expected_scales.flip(0))
+    )

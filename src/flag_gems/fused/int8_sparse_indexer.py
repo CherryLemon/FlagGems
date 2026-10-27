@@ -56,11 +56,22 @@ def _check_vector(value, size, name):
 
 
 @triton.jit
+def _power_of_two_scale(amax):
+    # Keep the minimum on amax before division, including all-zero rows.
+    raw_scale = tl.div_rn(tl.maximum(amax, 1e-10), 127.0)
+    # The finite FP32 input domain makes raw_scale positive and normal.
+    # Reading its mantissa avoids log2 rounding away a one-ULP excess.
+    bits = raw_scale.to(tl.uint32, bitcast=True)
+    exponent = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).to(tl.uint32)
+    return (exponent << 23).to(tl.float32, bitcast=True)
+
+
+@triton.jit
 def _quantize(X, Q, S, XS: tl.constexpr, D: tl.constexpr):
     row = tl.program_id(0)
     d = tl.arange(0, D)
     x = tl.load(X + row * XS + d).to(tl.float32)
-    scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(tl.max(tl.abs(x)), 1e-10) / 127.0)))
+    scale = _power_of_two_scale(tl.max(tl.abs(x)))
     q = libdevice.nearbyint(tl.minimum(tl.maximum(x / scale, -127.0), 127.0))
     tl.store(Q + row * D + d, q.to(tl.int8))
     tl.store(S + row, scale)
@@ -123,7 +134,7 @@ def _cache_store(
     if slot >= 0:
         d = tl.arange(0, 128)
         k = tl.load(K + row * KS + d).to(tl.float32)
-        scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(tl.max(tl.abs(k)), 1e-10) / 127.0)))
+        scale = _power_of_two_scale(tl.max(tl.abs(k)))
         q = libdevice.nearbyint(tl.minimum(tl.maximum(k / scale, -127.0), 127.0))
         page, offset = slot // P, slot % P
         tl.store(V + page * VS + offset * 128 + d, q.to(tl.int8))
