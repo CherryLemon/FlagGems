@@ -103,9 +103,12 @@ causal lengths and TopK remain with the caller. Metadata failures raise before
 launch; launch failures propagate. These are inference-only GPU APIs.
 
 Query quantization and cache-store share this scale arithmetic. Paged-logits
-math and the packed-cache layout are unchanged. Current package GPU/graph and
-whole-model qualification remain open; CPU reference, metadata and packaging
-checks do not establish them.
+math and the packed-cache layout are unchanged. The public wheel at
+`b3cb254c55b52c450131ada0ba87109ca18c6c25` passed all 72 component-packet tests
+on H100/SM90 with Torch 2.13.0+cu129 and Triton 3.6.0. This mixed CPU/metadata/GPU
+suite covers the three INT8 APIs, strict FP16/BF16/FP32 scale boundaries and
+ordinary graph replay with refreshed inputs and cache state. It does not qualify
+RMSNorm/small-M on this package, framework integration or whole-model behavior.
 
 ## Sample models for testing
 
