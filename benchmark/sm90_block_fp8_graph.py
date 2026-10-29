@@ -14,9 +14,15 @@ import torch
 import triton
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from flag_gems.ops._w8a8_block_fp8_configs import _H100_MIDRANGE_FP8_CONFIGS
-from flag_gems.ops.w8a8_block_fp8_matmul import w8a8_block_fp8_matmul
-from tests.sm90_fp8_helpers import assert_exact, fp8_inputs
+from flag_gems.ops._w8a8_block_fp8_configs import (  # noqa: E402
+    _H100_MIDRANGE_FP8_CONFIGS,
+)
+from flag_gems.ops.w8a8_block_fp8_matmul import w8a8_block_fp8_matmul  # noqa: E402
+from tests.sm90_fp8_helpers import (  # noqa: E402
+    assert_exact,
+    fp8_inputs,
+    native_block_fp8_baseline,
+)
 
 
 def cases(quick):
@@ -36,9 +42,9 @@ def cases(quick):
 
 def prepare(shape):
     xs = fp8_inputs(*shape)
-    return lambda: w8a8_block_fp8_matmul(
-        *xs, [32, 32], tuned=False
-    ), lambda: w8a8_block_fp8_matmul(*xs, [32, 32])
+    return lambda: native_block_fp8_baseline(*xs), lambda: w8a8_block_fp8_matmul(
+        *xs, [32, 32]
+    )
 
 
 def main():
@@ -60,7 +66,10 @@ def main():
         rounds=a.rounds,
         rep_ms=a.rep_ms,
         warmup=25,
-        method="median CUDA Graph; alternate order and reverse shapes in second round; full public wrapper incl. reductions",
+        method=(
+            "median CUDA Graph; alternate order and reverse shapes in second round; "
+            "native test helper versus public wrapper, both incl. reductions"
+        ),
         measurements=rows,
     )
     for rnd in range(a.rounds):

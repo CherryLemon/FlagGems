@@ -14,19 +14,20 @@
 
 import pytest
 import torch
+
 from flag_gems.ops.w8a8_block_fp8_matmul import w8a8_block_fp8_matmul
-
-
-def _matmul(A, B, As, Bs, output_dtype=torch.bfloat16, *, tuned=True):
-    return w8a8_block_fp8_matmul(A, B, As, Bs, [32, 32], output_dtype, tuned=tuned)
-
-
 from tests.sm90_fp8_helpers import (
     assert_exact,
     changed_graph,
     fp8_inputs,
     fp8_reference,
+    native_block_fp8_baseline,
 )
+
+
+def _matmul(A, B, As, Bs, output_dtype=torch.bfloat16):
+    return w8a8_block_fp8_matmul(A, B, As, Bs, [32, 32], output_dtype)
+
 
 pytestmark = [
     pytest.mark.dsv41_block_fp8_matmul,
@@ -72,7 +73,7 @@ def test_actual_decode_row_buckets(m, dtype):
     # Attention projection plus fallback-only boundary rows use the same K32 contract.
     args = fp8_inputs(m, 1792, 5120)
     fn = lambda *x: _matmul(*x, output_dtype=dtype)
-    baseline = lambda *x: _matmul(*x, output_dtype=dtype, tuned=False)
+    baseline = lambda *x: native_block_fp8_baseline(*x, output_dtype=dtype)
     assert_exact(fn(*args), baseline(*args))
     expected = fp8_reference(*args, output_dtype=dtype)
     # FP8 MMA's native accumulation already differs from FP32 Torch. The
@@ -105,7 +106,7 @@ def test_actual_decode_row_buckets(m, dtype):
 def test_full_projection_families(m, n, k):
     args = fp8_inputs(m, n, k)
     a = _matmul(*args)
-    b = _matmul(*args, tuned=False)
+    b = native_block_fp8_baseline(*args)
     assert_exact(a, b)
     for _ in range(10):
         assert_exact(_matmul(*args), a)

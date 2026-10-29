@@ -363,11 +363,10 @@ def _w8a8_block_fp8_matmul_hopper_static(
     tl.store(c_ptrs, c, mask=c_mask)
 
 
-def block_fp8_matmul_sm90(A, B, As, Bs, output_dtype=torch.bfloat16, *, tuned=True):
+def block_fp8_matmul_sm90(A, B, As, Bs, output_dtype=torch.bfloat16):
     """Multiply E4M3FN A[M,K] by B[N,K]^T with numeric FP32 K32 scales.
 
     As is [M,K/32], Bs is [ceil(N/32),K/32]. Strided scales are accepted.
-    Tuned=False is the frozen native configured schedule, for controlled A/B.
     Unsupported dtype/layout/device inputs fail before launching a kernel.
     """
     if not (A.is_cuda and A.device == B.device == As.device == Bs.device):
@@ -405,7 +404,7 @@ def block_fp8_matmul_sm90(A, B, As, Bs, output_dtype=torch.bfloat16, *, tuned=Tr
         )
     )
     measured = _H100_MIDRANGE_FP8_CONFIGS.get((m, n, k))
-    finite = bool(tuned and measured is not None and config == measured[0])
+    finite = bool(measured is not None and config == measured[0])
     if finite:
         config = measured[1]
     hopper = bool(config.get("SWAP_AB", False) or config.get("SPLIT_K", 1) > 1)

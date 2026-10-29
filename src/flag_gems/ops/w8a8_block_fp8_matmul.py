@@ -18,11 +18,12 @@ import math
 import os
 from typing import Any
 
-import flag_gems
 import torch
 import triton
 import triton.language as tl
 import yaml
+
+import flag_gems
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +237,22 @@ def _select_w8a8_block_fp8_config(configs, M, block_n, block_k):
     return _get_default_w8a8_block_fp8_config(block_n, block_k)
 
 
+def _resolve_tle_short():
+    """Resolve the optional TLE path before any kernel is launched."""
+    try:
+        from ._w8a8_block_fp8_tle_short import block_fp8_matmul_tle_short, tle
+    except ModuleNotFoundError as error:
+        if error.name and error.name.startswith("triton.experimental.tle"):
+            return None
+        raise
+    gpu = getattr(tle, "gpu", None)
+    if gpu is None or not all(
+        hasattr(gpu, name) for name in ("alloc", "copy", "smem", "wgmma", "wgmma_wait")
+    ):
+        return None
+    return block_fp8_matmul_tle_short
+
+
 def w8a8_block_fp8_matmul(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -243,8 +260,6 @@ def w8a8_block_fp8_matmul(
     Bs: torch.Tensor,
     block_size: list[int],
     output_dtype: torch.dtype = torch.bfloat16,
-    *,
-    tuned: bool = True,
 ) -> torch.Tensor:
     assert len(block_size) == 2
     block_n, block_k = block_size[0], block_size[1]
@@ -280,32 +295,21 @@ def w8a8_block_fp8_matmul(
         from ._w8a8_block_fp8_configs import _H100_MIDRANGE_FP8_CONFIGS
 
         if (M, N, K) in _H100_MIDRANGE_FP8_CONFIGS:
-            if tuned and triton.__version__.split("+")[0] == "3.6.0":
-                from ._w8a8_block_fp8_tle_short_configs import _H100_TLE_SHORT_CONFIGS
+            from ._w8a8_block_fp8_tle_short_configs import _H100_TLE_SHORT_CONFIGS
 
-                short_config = _H100_TLE_SHORT_CONFIGS.get((M, N, K))
-                if (
-                    short_config is not None
-                    and A.data_ptr() % 16 == 0
-                    and B.data_ptr() % 16 == 0
-                ):
-                    try:
-                        from ._w8a8_block_fp8_tle_short import (
-                            block_fp8_matmul_tle_short,
-                        )
-                    except ModuleNotFoundError as error:
-                        if not error.name or not error.name.startswith(
-                            "triton.experimental.tle"
-                        ):
-                            raise
-                    else:
-                        return block_fp8_matmul_tle_short(
-                            A, B, As, Bs, output_dtype, **short_config
-                        )
+            short_config = _H100_TLE_SHORT_CONFIGS.get((M, N, K))
+            if (
+                short_config is not None
+                and A.data_ptr() % 16 == 0
+                and B.data_ptr() % 16 == 0
+            ):
+                short = _resolve_tle_short()
+                if short is not None:
+                    return short(A, B, As, Bs, output_dtype, **short_config)
 
             from ._w8a8_block_fp8_sm90 import block_fp8_matmul_sm90
 
-            return block_fp8_matmul_sm90(A, B, As, Bs, output_dtype, tuned=tuned)
+            return block_fp8_matmul_sm90(A, B, As, Bs, output_dtype)
 
     C_shape = A.shape[:-1] + (N,)
     C = A.new_empty(C_shape, dtype=output_dtype)
