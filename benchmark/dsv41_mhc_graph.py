@@ -14,8 +14,8 @@ import torch
 import triton
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from flag_gems.fused.dsv41 import mhc
-from tests.dsv41_helpers import assert_exact, mhc_inputs
+from flag_gems.fused.dsv41 import mhc  # noqa: E402
+from tests.dsv41_helpers import assert_exact, mhc_inputs  # noqa: E402
 
 
 def cases(quick):
@@ -59,7 +59,10 @@ def main():
         rounds=a.rounds,
         rep_ms=a.rep_ms,
         warmup=25,
-        method="median CUDA Graph; alternate order and reverse shapes in second round; full public wrapper incl. reductions",
+        method=(
+            "median CUDA Graph; alternate order and reverse shapes in second round; "
+            "full public wrapper incl. reductions"
+        ),
         measurements=rows,
     )
     for rnd in range(a.rounds):

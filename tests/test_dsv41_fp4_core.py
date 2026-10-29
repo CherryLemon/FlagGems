@@ -14,8 +14,9 @@
 
 import pytest
 import torch
+
 from flag_gems.fused.dsv41.fp4_indexer import fp4_index_logits_decode
-from tests.dsv41_helpers import assert_exact, changed_graph, fp4_inputs, fp4_reference
+from tests.dsv41_helpers import changed_graph, fp4_inputs, fp4_reference
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 

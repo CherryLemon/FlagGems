@@ -17,10 +17,10 @@ import torch
 import triton
 
 pytest.importorskip("triton.experimental.gluon")
-from triton.experimental import gluon as g
-from triton.experimental.gluon import language as gl
+from triton.experimental import gluon as g  # noqa: E402
+from triton.experimental.gluon import language as gl  # noqa: E402
 
-from flag_gems.fused.dsv41.fp4_fp8 import (
+from flag_gems.fused.dsv41.fp4_fp8 import (  # noqa: E402
     e2m1x4_to_fp8,
     normal_ue8m0_scale,
     prepare_fp4_query,

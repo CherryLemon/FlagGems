@@ -7,7 +7,10 @@ import torch
 import triton
 import triton.language as tl
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0),
+    reason="requires SM90 FP8 support",
+)
 
 
 @triton.jit
