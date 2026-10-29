@@ -69,6 +69,35 @@ def _masked_row_quant(
             tl.store(S + pid, stored)
 
 
+@triton.jit
+def _quant_compact(
+    X,
+    Q,
+    S,
+    COUNTS,
+    CAP: tl.constexpr,
+    K: tl.constexpr,
+    SPLITS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    CALC_SCALE: tl.constexpr,
+    FINALIZE_SCALE: tl.constexpr,
+    QUANT_TENSOR: tl.constexpr,
+):
+    expert = tl.program_id(0)
+    slot = tl.program_id(1)
+    count = tl.load(COUNTS + expert)
+    tl.device_assert((count >= 0) & (count <= CAP), "Invalid native masked_m")
+    cols = tl.arange(0, BLOCK)
+    for row in tl.range(slot, count, SPLITS):
+        pid = expert * CAP + row
+        x = tl.load(X + pid * K + cols, mask=cols < K, other=0.0).to(tl.float32)
+        scale, stored = FINALIZE_SCALE(CALC_SCALE(x, "float8e4m3"), "float32", 1.0, 1.0)
+        inv_scale = 1 / scale
+        q = QUANT_TENSOR(x * inv_scale, "float8e4m3")
+        tl.store(Q + pid * K + cols, q, mask=cols < K)
+        tl.store(S + pid, stored)
+
+
 def masked_row_quant(
     inputs,
     quanted,
@@ -80,6 +109,7 @@ def masked_row_quant(
     quant_tensor,
     workers=132,
     num_warps=4,
+    row_splits=None,
 ):
     """Write and return ``(quanted, scales)`` with caller-pinned numeric helpers.
 
@@ -105,7 +135,10 @@ def masked_row_quant(
         or scales.dtype != torch.float32
     ):
         raise TypeError("Expected BF16 input, E4M3 output and FP32 scales")
-    if tuple(quanted.shape) != (e * cap, k) or tuple(scales.shape) != (e * cap, 1):
+    if tuple(quanted.shape) != (e * cap, k) or tuple(scales.shape) != (
+        e * cap,
+        1,
+    ):
         raise ValueError("Expected physical [E*capacity,K] q and [E*capacity,1] scales")
     if counts.dtype != torch.int32 or tuple(counts.shape) != (e,):
         raise TypeError("Expected device int32[E] counts")
@@ -133,6 +166,24 @@ def masked_row_quant(
         for f in (calc_scale, finalize_scale, quant_tensor)
     ):
         raise TypeError("Numeric callbacks must be pinned Triton JIT functions")
+    if row_splits is not None:
+        if row_splits not in (1, 2, 4, 8, 16, 32):
+            raise ValueError("Invalid compact row split count")
+        _quant_compact[(e, row_splits)](
+            inputs,
+            quanted,
+            scales,
+            counts,
+            CAP=cap,
+            K=k,
+            SPLITS=row_splits,
+            BLOCK=triton.next_power_of_2(k),
+            CALC_SCALE=calc_scale,
+            FINALIZE_SCALE=finalize_scale,
+            QUANT_TENSOR=quant_tensor,
+            num_warps=num_warps,
+        )
+        return quanted, scales
     _masked_row_quant[(workers,)](
         inputs,
         quanted,

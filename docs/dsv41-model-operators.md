@@ -3,7 +3,7 @@
 These operators accept tensors and documented numeric layouts. They do not
 import SGLang. Model-specific computation belongs here even when it uses
 TileLang; framework request allocators and candidate layouts remain in
-[FlagGems-sglang #161](https://github.com/flagos-ai/FlagGems-sglang/pull/161).
+[FlagGems-sglang #194](https://github.com/flagos-ai/FlagGems-sglang/pull/194).
 Block-FP8 GEMM is maintained separately in
 [FlagGems #6631](https://github.com/flagos-ai/FlagGems/pull/6631).
 
@@ -90,33 +90,9 @@ its import/compilation is lazy. `MHC_EXACT_ABI=1` describes this interface.
 The old unrelated block-FP8 conversion and approximate fusion files are
 removed from this PR. FP4 and mHC changes are separate review commits.
 
-Run from a CUDA checkout with `PYTHONPATH=src`:
-
-```bash
-python -m pytest -q tests/test_dsv41_fp4_core.py tests/test_dsv41_mhc.py
-python benchmark/dsv41_mhc_graph.py --out mhc-graph.json --rounds 2 --rep-ms 100
-```
-
-Tests use independent Torch references, byte-exact regression and changed
-CUDA Graph inputs. The pre-split mHC microbenchmark measured 24 logical
-serving rows, geometric mean 1.084x, range 1.000–1.285x, retaining unchanged
-rows and measurement noise. The immutable numerical source is
-[the measured pre-split port](https://github.com/CherryLemon/FlagGems-sglang/commit/b188ef6b9de41138331299651aa23f3e11fb8187).
-Framework FP4 fusion speedups are documented in its owning repository,
-not attributed to the standalone explicit-slot API here.
-
-On H100 with Triton/FlagTree 3.6.0, the contiguous BF16 `[50, 20480]` and
-`[60, 20480]` statistics paths cap registers at 168 per thread. The FP32
-weight shape is `[24, 20480]`. This preserves all kernel arithmetic while
-raising the register-limited resident blocks per SM from two to three,
-without spilling. Other shapes, dtypes, layouts, architectures and compiler
-versions retain their existing launch settings. Two paired CUDA Graph rounds
-measured the full fused statistics/Sinkhorn call at 19.740 to 16.339 us
-(1.208x) and 19.659 to 16.073 us (1.223x), respectively, compared with the
-previous fused implementation under FlagTree 3.6. All 24 benchmark shapes
-passed byte-exact independent native-3.7 regression and changed-input graph
-replay; the public tests and target stress checks passed memcheck. These are
-operator-level results.
+On H100 the contiguous BF16 `[50, 20480]` and `[60, 20480]` statistics
+paths with `[24, 20480]` FP32 weights use a capped register launch. Other
+inputs retain their existing launch settings.
 
 
 ## Common prefill and MoE math
@@ -133,13 +109,18 @@ contracts, with no SGLang model objects, request tables or scheduler state:
   be known at the post boundary. The public selected path uses direct loads.
 * `mhc_prefill_stats`: per-call K-major high/low TF32 weight preparation, with
   the original 80-slice reduction order and no cached tensor/workspace.
-* `masked_row_quant`: explicit expert/capacity rows and device valid counts.
+* `fp4_prefill`: converts BF16 queries and gathers explicit packed FP4 slots
+  into FP8, and computes dense FP8 index scores for general head counts.
+* `masked_row_quant`: explicit expert/capacity rows and device valid counts;
+  optional row splits select the compact scheduling variant without changing
+  the physical output layout.
+* `masked_swiglu`: clipped gate/up activation on valid expert rows, with a
+  caller-supplied Triton activation callback and caller-owned output.
 * `swiglu_row_quant`: clipped gate/up activation, BF16 materialization and
   row quantization. The caller supplies original calc/finalize/conversion JIT
   callbacks. Invalid route rows and output padding remain untouched.
 
 The callback interfaces deliberately avoid a dependency on Humming; its source
 qualification and SGLang route layout belong to FlagGems-sglang. Host wrappers
-reject unsupported layouts before launch. Newly extracted API boundaries
-remain draft pending a fresh GPU integration run. Original qualification and
-the new CPU contract checks are recorded separately.
+reject unsupported layouts before launch. The caller owns output buffers and
+must provide non-overlapping storage on the same device.
