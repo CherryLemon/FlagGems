@@ -7,3 +7,5 @@
 
 from ._w8a8_block_fp8_sm90 import _reduce_block_fp8_split_k as _reduce_split_k
 from ._w8a8_block_fp8_sm90 import _w8a8_block_fp8_matmul_hopper
+
+__all__ = ["_reduce_split_k", "_w8a8_block_fp8_matmul_hopper"]

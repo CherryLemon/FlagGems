@@ -74,9 +74,9 @@ def test_missing_block32_shape_uses_default(monkeypatch):
 
 def test_sm90_full_decode_matrix_is_finite_and_preserves_baseline():
     from flag_gems.ops._w8a8_block_fp8_configs import (
-        BLOCK_FP8_SM90_ABI,
         _BASE_CONFIGS,
         _H100_MIDRANGE_FP8_CONFIGS,
+        BLOCK_FP8_SM90_ABI,
     )
 
     assert BLOCK_FP8_SM90_ABI == 1

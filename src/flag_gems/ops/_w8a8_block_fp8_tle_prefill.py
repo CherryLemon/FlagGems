@@ -4,8 +4,8 @@
 
 import torch
 import triton
-import triton.language as tl
 import triton.experimental.tle.language as tle
+import triton.language as tl
 
 QUALIFIED_SHAPES = frozenset(
     (

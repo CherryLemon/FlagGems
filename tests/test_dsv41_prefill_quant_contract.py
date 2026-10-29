@@ -1,8 +1,8 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 import torch
 
