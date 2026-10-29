@@ -15,7 +15,11 @@ import triton
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from flag_gems.fused.dsv41 import mhc  # noqa: E402
-from tests.dsv41_helpers import assert_exact, mhc_inputs  # noqa: E402
+from tests.dsv41_helpers import (  # noqa: E402
+    assert_exact,
+    mhc_inputs,
+    native_mhc_mix_stats,
+)
 
 
 def cases(quick):
@@ -30,7 +34,7 @@ def prepare(shape):
     x, w, s, b = mhc_inputs(*shape)
 
     def base():
-        return mhc.hc_split_sinkhorn(mhc.hc_mix_stats(x, w, 1e-6, tuned=False), s, b)
+        return mhc.hc_split_sinkhorn(native_mhc_mix_stats(x, w, 1e-6), s, b)
 
     cand = (
         (lambda: mhc.hc_mix_stats_sinkhorn_exact(x, w, s, b, 4, 20, 1e-6, 1e-6))
@@ -61,7 +65,7 @@ def main():
         warmup=25,
         method=(
             "median CUDA Graph; alternate order and reverse shapes in second round; "
-            "full public wrapper incl. reductions"
+            "native test helper versus public wrapper, both incl. reductions"
         ),
         measurements=rows,
     )

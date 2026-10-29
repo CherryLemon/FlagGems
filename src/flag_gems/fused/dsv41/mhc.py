@@ -221,9 +221,7 @@ def _hc_mix_extra_launch_options(x: torch.Tensor, fn: torch.Tensor):
     return {}
 
 
-def hc_mix_stats(
-    x_flat: torch.Tensor, hc_fn: torch.Tensor, eps: float, *, tuned=True
-) -> torch.Tensor:
+def hc_mix_stats(x_flat: torch.Tensor, hc_fn: torch.Tensor, eps: float) -> torch.Tensor:
     """Batch-invariant F.linear(x_flat.float(), hc_fn) * rsqrt(mean(x_flat^2) + eps).
 
     x_flat is [M, K] in any float dtype; hc_fn is [MIX, K] fp32; returns [M, MIX] fp32.
@@ -245,9 +243,7 @@ def hc_mix_stats(
     mixes = torch.empty((m, mix), dtype=torch.float32, device=x_flat.device)
     if m == 0:
         return mixes
-    block_m, num_stages = (
-        _hc_mix_geometry_for(m, k) if tuned else (_block_m_for(m), _HC_MIX_NUM_STAGES)
-    )
+    block_m, num_stages = _hc_mix_geometry_for(m, k)
     grid_m = triton.cdiv(m, block_m)
     _hc_mix_stats_partial_kernel[(grid_m, num_slices)](
         x_flat,
@@ -266,7 +262,7 @@ def hc_mix_stats(
         DOT_PRECISION=_HC_MIX_DOT_PRECISION,
         num_warps=_HC_MIX_NUM_WARPS,
         num_stages=num_stages,
-        **(_hc_mix_extra_launch_options(x_flat, hc_fn) if tuned else {}),
+        **_hc_mix_extra_launch_options(x_flat, hc_fn),
     )
     _hc_mix_stats_reduce_kernel[(grid_m,)](
         part_mix,

@@ -73,6 +73,60 @@ def mhc_inputs(m, k=20480, seed=71):
     return x, fn, scale, base
 
 
+def native_mhc_mix_stats(x, fn, eps):
+    """Run the original launch geometry for numerical regression tests."""
+    import triton
+
+    from flag_gems.fused.dsv41 import mhc
+
+    assert x.dim() == 2 and fn.dim() == 2
+    assert x.stride(1) == fn.stride(1) == 1 and fn.dtype == torch.float32
+    m, k = x.shape
+    mix = fn.shape[0]
+    assert fn.shape[1] == k
+    slices = mhc._num_slices_for(k)
+    mix_pad = max(16, triton.next_power_of_2(mix))
+    part_mix = torch.empty((slices, m, mix), dtype=torch.float32, device=x.device)
+    part_sq = torch.empty((slices, m), dtype=torch.float32, device=x.device)
+    result = torch.empty((m, mix), dtype=torch.float32, device=x.device)
+    if m == 0:
+        return result
+    block_m = mhc._block_m_for(m)
+    grid_m = triton.cdiv(m, block_m)
+    mhc._hc_mix_stats_partial_kernel[(grid_m, slices)](
+        x,
+        fn,
+        part_mix,
+        part_sq,
+        m,
+        k,
+        x.stride(0),
+        fn.stride(0),
+        MIX=mix,
+        MIX_PAD=mix_pad,
+        NUM_SLICES=slices,
+        BLOCK_M=block_m,
+        BLOCK_K=mhc._HC_MIX_BLOCK_K,
+        DOT_PRECISION=mhc._HC_MIX_DOT_PRECISION,
+        num_warps=mhc._HC_MIX_NUM_WARPS,
+        num_stages=mhc._HC_MIX_NUM_STAGES,
+    )
+    mhc._hc_mix_stats_reduce_kernel[(grid_m,)](
+        part_mix,
+        part_sq,
+        result,
+        m,
+        1.0 / k,
+        eps,
+        MIX=mix,
+        MIX_PAD=mix_pad,
+        NUM_SLICES=slices,
+        BLOCK_M=block_m,
+        num_warps=4,
+    )
+    return result
+
+
 def assert_exact(a, b):
     if isinstance(a, (tuple, list)):
         assert len(a) == len(b)

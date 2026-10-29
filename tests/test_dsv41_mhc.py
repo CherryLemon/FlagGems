@@ -16,7 +16,12 @@ import pytest
 import torch
 
 from flag_gems.fused.dsv41 import mhc as gems
-from tests.dsv41_helpers import assert_exact, changed_graph, mhc_inputs
+from tests.dsv41_helpers import (
+    assert_exact,
+    changed_graph,
+    mhc_inputs,
+    native_mhc_mix_stats,
+)
 
 pytestmark = [
     pytest.mark.dsv41_mhc,
@@ -64,7 +69,7 @@ def test_stats_and_predecessor_combine(m):
         x.float().square().mean(-1, keepdim=True) + 1e-6
     )
     actual = gems.hc_mix_stats(x, fn, 1e-6)
-    assert_exact(actual, gems.hc_mix_stats(x, fn, 1e-6, tuned=False))
+    assert_exact(actual, native_mhc_mix_stats(x, fn, 1e-6))
     torch.testing.assert_close(actual, expected, rtol=2e-4, atol=3e-5)
     pre = torch.rand((m, 4), device="cuda")
     expected = (x.view(m, 4, -1).float() * pre[..., None]).sum(1).bfloat16()
